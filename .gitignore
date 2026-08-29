@@ -1,0 +1,12 @@
+.spyproject/
+__pycache__/
+_avast_/
+resnet18/
+*.png
+*.jpg
+*.pt
+*.pth 
+*.mat
+*.csv
+*.pkl
+*.h5
