@@ -10,7 +10,7 @@ import os
 import mne
 from mne.preprocessing import ICA
 from mne_icalabel import label_components
-
+import pyprep as pp
 
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 # Load your metadata dataframe
@@ -52,27 +52,25 @@ def rename_channels_eeglab_standard(raw):
         'FPZ': 'Fpz',
         'OZ': 'Oz'
     }
-    
     # Neuroscan files often use older 10-20 names (T3/T4) instead of the updated 10-10 names (T7/T8). 
     # If your files use T3/T4, you must rename those as well so MNE can find the lateral anchors.
     if 'T3' in raw.ch_names:
         rename_mapping.update({'T3': 'T7', 'T4': 'T8'})
     elif 'T7' in raw.ch_names or 'T7' in [ch.upper() for ch in raw.ch_names]:
         rename_mapping.update({'T7': 'T7', 'T8': 'T8'})
-    
     # Apply the renaming
     raw.rename_channels(rename_mapping)
-    
     # Plot the figure for your publication
     raw.plot_sensors(kind='topomap', sphere='eeglab')
     
     
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
+# DO SOME PRELIMINARY PROCESSING OF METADATA TO EXTRACT CORRECT .CNT FILENAMES
 # Create a new column with the clean .cnt filenames
 meta_df['cnt_filename'] = meta_df['eeg_file_name'].apply(extract_cnt_name)
 print(meta_df[['eeg_file_name', 'cnt_filename']].head())
+
 
 # OPEN CNT FILE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 i = 1
@@ -84,23 +82,20 @@ data = mne.io.read_raw_cnt(cnt_file_path, data_format='int16', preload=True)
 raw = data.copy()
 
 # MONTAGE SETUP ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-channels = raw.ch_names
-info = raw.info
 # WE EXCLUDE THE BLANK CHANNEL AND RELABEL CHANNEL TYPES OF THE TWO EYE CHANNELS TO eog
 # ASSUMES THAT ALL CHANNELS ARE LABELED AS EEG WHETHER THEY ARE OR NOT
 # X = VEOG, Y = HEOG
 for ch in eye_blink_chans:
-    if ch in channels:
+    if ch in raw.ch_names:
         raw.set_channel_types({ch: 'eog'})
-raw.set_channel_types({'BLANK': 'misc'})
-
-# raw.info['bads'] = ['BLANK']
+raw.drop_channels(['BLANK'], on_missing='warn')
 montage = mne.channels.make_standard_montage('standard_1005')
 raw.set_montage(montage, match_case=False)
-# rename_channels_eeglab_standard(raw.copy())
+rename_channels_eeglab_standard(raw)
 # raw.plot_sensors(kind='3d')
 
 # IMPORT AND DOWNSAMPLE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# downsampling to reduce processing time and for consistency
 if raw.info['sfreq'] > 256.0:
     raw.resample(256.0)
     # INITIAL FILTERING
@@ -116,11 +111,43 @@ if raw.info['sfreq'] > 256.0:
 
 
 
+
+
+
 # RE-REFERENCING ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # WE NEED TO APPLY A COMMON AVERAGE REFERENCE TO USE MNE-ICALabel         
 raw = raw.set_eeg_reference("average")
 
 # ARTIFACT REMOVAL ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# # 1. Initialize the ICA object 
+# ica = ICA(
+#     n_components=15,
+#     max_iter="auto",
+#     random_state=42,
+#     method="infomax",
+#     fit_params=dict(extended=True),
+#     verbose=False
+#     )
+# # 2. Fit the ICA STRICTLY on the scalp EEG channels to prevent EOG variance distortion
+# ica.fit(raw, picks='eeg')
+# # 3. Ground-Truth Validation: Correlate components with physical EOG
+# # MNE automatically looks for channels with the 'eog' type to perform this math
+# eog_indices, eog_scores = ica.find_bads_eog(raw)
+# # 4. Automatically add the highly correlated components to the exclusion list
+# ica.exclude.extend(eog_indices)
+# print(f"Ground-truth validation flagged the following eye components: {eog_indices}")
+# # 5. Run mne-icalabel to catch remaining non-eye artifacts (muscle, heartbeat)
+# ic_labels = label_components(raw, ica, method='iclabel')
+# # Extract components labeled as 'muscle' or 'heart' and add them to the exclusion list
+# probabilities = ic_labels['y_pred_proba']
+# labels = ic_labels['labels']
+# for idx, label in enumerate(labels):
+#     if label in ['muscle artifact', 'heart beat'] and idx not in ica.exclude:
+#         ica.exclude.append(idx)
+# # 6. Apply the ICA to subtract all flagged components from the continuous data
+# # This leaves the underlying brain activity intact
+# raw_clean = ica.apply(raw.copy())
+
 ica = ICA(
     n_components=15,
     max_iter="auto",
@@ -129,19 +156,23 @@ ica = ICA(
     fit_params=dict(extended=True),
     verbose=False
 )
-ica.fit(raw)
+ica.fit(raw, picks='eeg')
+eog_indices, eog_scores = ica.find_bads_eog(raw)
+ica.exclude.extend(eog_indices)
 # WE COMBINE THE NON-BRAIN ICs FROM BOTH eog_indices AND exclude_idx TO 
 # COVER ALL POSSIBLE NON-BRAIN ARTIFACTS FOR REMOVAL
 ic_labels = label_components(raw, ica, method="iclabel")
+probabilities = ic_labels['y_pred_proba']
 labels = ic_labels["labels"]
 # THEN EXCLUDE ANY ICs THAT ARE NOT CLASSIFIED AS 'BRAIN' OR 'OTHER'
 exclude_idx = [idx for idx, label in enumerate(labels) if label not in ["brain", "other"]]
 # AND FINALLY WE RECONSTRUCT THE SIGNAL USING THE INCLUDED ICs
-# reconst_data = filtered_data.copy()
 # COMBINING ALL NON-BRAIN ICs AND REMOVING THEM
 ic_to_remove = [*set(exclude_idx)]
 ica.exclude = ic_to_remove
-ica.apply(raw)
+rawclean = ica.apply(raw)
+
+ica.plot_components(sphere='eeglab')
 
 
 
