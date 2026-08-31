@@ -164,8 +164,10 @@ except (RuntimeError, MemoryError, ValueError) as e:
     
     # In your final script, append this filename to a 'failed_files_log.txt' here
     with open(WRITE_PATH + 'errors_cnt_files.txt', 'a') as bf:
-        # bf.write(str(cnt_file_name) + '\t ' + str(e) + '\n')
-        bf.write(str(cnt_file_name) + '\n')
+        bf.write(str(cnt_file_name) + '\t ' + str(e) + '\n')
+        # bf.write(str(cnt_file_name) + '\n')
+
+        
     # continue  <-- uncomment this when you put it in the actual for-loop
 
 raw = data.copy()
