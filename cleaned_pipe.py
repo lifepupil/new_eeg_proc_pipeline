@@ -20,8 +20,8 @@ WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 
 # Load and sort your metadata dataframe
 meta_df = pd.read_pickle(r'C:\Users\lifep\Documents\Data\pacdat_MASTER.pkl')
-meta_df = meta_df.sort_values(['ID', 'age_this_visit'], ascending=[True, True]).reset_index(drop=True)
 meta_df = meta_df[pd.notna(meta_df.eeg_file_name)]
+meta_df = meta_df.sort_values(['ID', 'age_this_visit'], ascending=[True, True]).reset_index(drop=True)
 
 notch_freq = 60.0       # FREQUENCY (Hz) TO REMOVE LINE NOISE FROM SIGNAL 
 lowfrq = 1              # LOW PASS FREQUENCY, RECOMMENDED SETTING TO 1 HZ IF USING mne-icalabel
@@ -38,6 +38,10 @@ def extract_cnt_name(csv_name):
 # PRELIMINARY PROCESSING OF METADATA
 meta_df['cnt_file_name'] = meta_df['eeg_file_name'].apply(extract_cnt_name)
 meta_df['sample_freq'] = meta_df['eeg_file_name'].str.split('_cnt_').str[1]
+meta_df['duration_seconds'] = 0
+meta_df['right_handed'] = 999
+meta_df['data_format'] = ''
+
 
 total_good = 0
 
@@ -55,6 +59,7 @@ for i in range(len(meta_df)):
     
     print(f"\n[{i+1}/{len(meta_df)}] Attempting to process: {meta_df.iloc[i].eeg_file_name}")
 
+
     if sample_freq == '256':
         this_data_format = 'int16'
     else:
@@ -63,6 +68,7 @@ for i in range(len(meta_df)):
     print(f"Expected Data format = {this_data_format}, sample rate = {sample_freq}")
 
     # 2. Safely Open the .cnt File
+    # TRY 'auto' FOR DATA FORMAT FIRST THEN TRY OTHER OPTION IF IT DOESN'T WORK
     try:
         raw_header = mne.io.read_raw_cnt(cnt_file_path, data_format='auto', preload=False, verbose=False)
         actual_sample_rate = raw_header.info['sfreq']
@@ -71,18 +77,52 @@ for i in range(len(meta_df)):
         
         data = raw_header.load_data()
         # raw = data.copy()
+        # LET'S GET THE DURATION OF THIS SIGNAL, RIGHT HANDEDNESS, AND DATA FORMAT TO OPEN
+        meta_df.loc[i,'duration_seconds'] = len(data.get_data(['CZ'])[0])/data.info['sfreq']
+        if 'hand' in data.info['subject_info'].keys():
+            meta_df.loc[i,'right_handed'] = data.info['subject_info']['hand']==1
+            
+        meta_df.loc[i,'data_format'] = 'auto'
         total_good+=1
         
     except (RuntimeError, MemoryError, ValueError) as e:
-        # Catch corrupted files, log them, and skip to the next iteration[cite: 5]
-        print(f"Skipping {cnt_file_name}: Header is mathematically corrupted.")
+        # Catch corrupted files, log them, and skip to the next iteration
+        print(f"Skipping {cnt_file_name}: Header may be corrupted - trying to open with {this_data_format}.")
+    
         with open(WRITE_PATH + 'errors_cnt_files.txt', 'a') as bf:
             bf.write(str(cnt_file_name) + '\n')
             # bf.write(str(cnt_file_name) + '\t ' + str(e) + '\n')
-            
+        meta_df.loc[i,'data_format'] = 'unknown'
         continue # Immediately move to the next file in the loop
+
+            
+        # try:
+        #     raw_header = mne.io.read_raw_cnt(cnt_file_path, data_format=this_data_format, preload=False, verbose=False)
+        #     actual_sample_rate = raw_header.info['sfreq']
+        #     channel_count = raw_header.info['nchan']
+        #     print(f"Success: File contains {channel_count} channels sampled at {actual_sample_rate} Hz.")
+        #     data = raw_header.load_data()
+        #     # raw = data.copy()
+        #     # LET'S GET THE DURATION OF THIS SIGNAL, RIGHT HANDEDNESS, AND DATA FORMAT TO OPEN
+        #     meta_df.iloc[i].duration_seconds = len(data.get_data(['CZ'])[0])/data.info['sfreq']
+        #     if 'hand' in data.info['subject_info'].keys():
+        #         meta_df.iloc[i].right_handed = data.info['subject_info']['hand']==1
+        #     meta_df.iloc[i].data_format = this_data_format
+        #     total_good+=1
+        # except (RuntimeError, MemoryError, ValueError) as e:
+        #     # Catch corrupted files, log them, and skip to the next iteration[cite: 5]
+        #     print(f"Skipping {cnt_file_name}: Header is mathematically corrupted.")
+        #     with open(WRITE_PATH + 'errors_cnt_files.txt', 'a') as bf:
+        #         bf.write(str(cnt_file_name) + '\n')
+        #         # bf.write(str(cnt_file_name) + '\t ' + str(e) + '\n')
+        #     meta_df.iloc[i].data_format = 'unknown'
+        #     continue # Immediately move to the next file in the loop
+            
+            
+            
 print(f"\nTotal good CNT files = {total_good} out of {len(meta_df)}")
 
+meta_df.to_pickle(WRITE_PATH + 'meta_data.pkl')
 
     # # 3. Montage Setup
     # for ch in eye_blink_chans:
