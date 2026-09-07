@@ -11,7 +11,6 @@ import pandas as pd
 import mne
 from mne.preprocessing import ICA
 from mne_icalabel import label_components
-# import pyprep as pp
 from pyprep.find_noisy_channels import NoisyChannels
 from autoreject import AutoReject
 import traceback
@@ -20,21 +19,11 @@ import matplotlib.pyplot as plt
 
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
-# Load your metadata dataframe
-# meta_df = pd.read_pickle(r"E:\COGA_eec\pacdat_MASTER_fz.pkl")
-meta_df = pd.read_pickle(r'C:\Users\lifep\Documents\Data\pacdat_MASTER.pkl')
-
-meta_df = meta_df.sort_values(['ID', 'age_this_visit'], ascending=[True, True]).reset_index(drop=True)
-meta_df = meta_df[pd.notna(meta_df.eeg_file_name)]
-
-notch_freq = 60.0       # FREQUENCY (Hz) TO REMOVE LINE NOISE FROM SIGNAL 
+notch_freqs = [60.0, 80.0]     # FREQUENCY (Hz) TO REMOVE LINE NOISE AND UNKNOWN NOISE FROM SIGNAL  
 lowfrq = 1              # LOW PASS FREQUENCY, RECOMMENDED SETTING TO 1 HZ IF USING mne-icalabel
-hifrq = None             # HIGH PASS FREQUENCY
-maxZeroPerc = 0.5       # PERCENTAGE OF ZEROS IN SIGNAL ABOVE WHICH CHANNEL IS LABELED 'BADS'
-do_plot_channels = True # TO GENERATE PLOTS OF THE CLEANED EEG SIGNAL
-# mpl.rcParams['figure.dpi'] = 300 # DETERMINES THE RESOLUTION OF THE EEG PLOTS
+hifrq = 100             # HIGH PASS FREQUENCY
+do_plot_channels = False  # TO GENERATE PLOTS OF THE CLEANED EEG SIGNAL
 eye_blink_chans = ['X', 'Y'] # NAMES OF CHANNELS CONTAINING EOG
-institutionDir = 'uconn' # suny, indiana, iowa, uconn, ucsd, washu
     
 def extract_cnt_name(csv_name):
     """
@@ -70,18 +59,6 @@ def rename_channels_eeglab_standard(raw):
     # Plot the figure for your publication
     raw.plot_sensors(kind='topomap', sphere='eeglab')
     
-    
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-# DO SOME PRELIMINARY PROCESSING OF METADATA TO EXTRACT CORRECT .CNT FILENAMES
-# Create a new column with the clean .cnt filenames
-meta_df['cnt_file_name'] = meta_df['eeg_file_name'].apply(extract_cnt_name)
-meta_df['sample_freq'] = meta_df['eeg_file_name'].str.split('_cnt_').str[1]
-
-# print(meta_df[['eeg_file_name', 'cnt_file_name']].head())
-
-
-# CNT FILE CHECKS
 
 def salvage_cnt_data(file_path, data_dtype='<i4'):
     """
@@ -119,7 +96,25 @@ def salvage_cnt_data(file_path, data_dtype='<i4'):
     print(f"Successfully recovered {data_2d.shape[1]} samples across {n_channels} channels.")
     return data_2d
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Load the metadata dataframe
 
+meta_df = pd.read_pickle(f"{WRITE_PATH}meta_data.pkl")
+# meta_df = pd.read_pickle(r"E:\COGA_eec\pacdat_MASTER_fz.pkl")
+# meta_df = pd.read_pickle(r'C:\Users\lifep\Documents\Data\pacdat_MASTER.pkl')
+
+# DO SOME PRELIMINARY PROCESSING OF METADATA TO EXTRACT CORRECT .CNT FILENAMES
+
+# meta_df = meta_df[pd.notna(meta_df.eeg_file_name)]
+meta_df = meta_df[meta_df.data_format=='auto']
+meta_df = meta_df.sort_values(['ID', 'age_this_visit'], ascending=[True, True]).reset_index(drop=True)
+
+
+# Create a new column with the clean .cnt filenames
+meta_df['cnt_file_name'] = meta_df['eeg_file_name'].apply(extract_cnt_name)
+meta_df['sample_freq'] = meta_df['eeg_file_name'].str.split('_cnt_').str[1]
+
+# print(meta_df[['eeg_file_name', 'cnt_file_name']].head())
 
 
 # OPEN CNT FILE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -143,13 +138,12 @@ try:
     
     # 2. Extract the embedded hardware information
     actual_sample_rate = raw_header.info['sfreq']
-    # actual_sample_rate = raw_header.info['sfreq']
     channel_count = raw_header.info['nchan']
     
     print(f"Success: File contains {channel_count} channels sampled at {actual_sample_rate} Hz.")
     
     # 4. Now load the actual data safely into memory
-    data = raw_header.load_data()
+    raw = raw_header.load_data()
     
 except (RuntimeError, MemoryError, ValueError) as e:
     # If the file header is corrupted and triggers a byte/memory error, log it and skip
@@ -170,8 +164,7 @@ except (RuntimeError, MemoryError, ValueError) as e:
         
     # continue  <-- uncomment this when you put it in the actual for-loop
 
-raw = data.copy()
-raw.info
+
 
 # MONTAGE SETUP ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # WE EXCLUDE THE BLANK CHANNEL AND RELABEL CHANNEL TYPES OF THE TWO EYE CHANNELS TO eog
@@ -183,6 +176,7 @@ for ch in eye_blink_chans:
 raw.drop_channels(['BLANK'], on_missing='warn')
 montage = mne.channels.make_standard_montage('standard_1005')
 raw.set_montage(montage, match_case=False)
+# raw.compute_psd().plot()
 # rename_channels_eeglab_standard(raw)
 # raw.plot_sensors(kind='3d')
 
@@ -194,8 +188,8 @@ if raw.info['sfreq'] > 256.0:
 # LOW AND HIGH PASS FILTERING THAT SATISFIES ZERO-PHASE DESIGN
 raw = raw.filter(lowfrq, hifrq)
 # REMOVE 60 HZ LINE NOISE FROM SIGNAL WITH NOTCH FILTER
-raw.notch_filter(60, filter_length='auto', phase='zero', verbose=False)
-# raw.notch_filter(freqs=[30, 60, 90])
+# raw.notch_filter(60, filter_length='auto', phase='zero', verbose=False)
+raw.notch_filter(freqs=notch_freqs, filter_length='auto', phase='zero', verbose=False)
 
 # SIGNAL QUALITY CHECKS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Initialize the NoisyChannels object with your filtered data.
@@ -227,7 +221,8 @@ for test_name, failed_channels in bads_dict.items():
     if failed_channels:
         print(f"{test_name}: {failed_channels}")
 
-raw.compute_psd().plot()
+if do_plot_channels:    
+    raw.compute_psd().plot()
 
 
 # RE-REFERENCING ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -250,11 +245,11 @@ if eog_indices:
     print(f"Ground-truth validation flagged eye components: {eog_indices}")
     ica.exclude.extend(eog_indices)
     ica.plot_scores(eog_scores)
-    ica.plot_components(picks=eog_indices, sphere='eeglab')
+    ica.plot_components(picks=eog_indices) #, sphere='eeglab')
     ica.plot_properties(raw, picks=eog_indices)
 else:
-    print("No strong EOG correlations found. The subject likely did not blink.")
-    ica.plot_components(sphere='eeglab')
+    print("No strong EOG correlations found.")
+    # ica.plot_components()
 
     
 # WE COMBINE THE NON-BRAIN ICs FROM BOTH eog_indices AND exclude_idx TO 
@@ -271,11 +266,14 @@ ica.exclude = ic_to_remove
 raw_clean = ica.apply(raw)
 
 
-
 # PSEUDO-EPOCHING ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 1. Pseudo-Epoching: Slice the continuous clean data into fixed-length epochs
 # We are using 4.0 seconds, but 2 to 4 seconds is standard for resting state
-epochs = mne.make_fixed_length_epochs(raw_clean, duration=4.0, preload=True)
+epochs = mne.make_fixed_length_epochs(raw_clean, duration=10, preload=True)
+# THEN REMOVING PREDICTED BAD FOR UserWarning: 
+# channels are marked as bad. These will be ignored. 
+# If you want them to be considered by autoreject please remove them from epochs.info["bads"]
+epochs.info["bads"] = []
 
 # 2. Initialize AutoReject
 # This automatically computes thresholds to drop bad epochs
@@ -285,3 +283,32 @@ ar = AutoReject(random_state=42, picks='eeg')
 epochs_clean, reject_log = ar.fit_transform(epochs, return_log=True)
 
 print(f"Dropped {reject_log.bad_epochs.sum()} bad epochs out of {len(epochs)}.")
+
+# 10. Save your cleaned epochs here before the loop restarts
+epochs_clean.save(WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif'), overwrite=True)
+
+if do_plot_channels:
+    # # DEBUG
+    # file_path = r"E:\COGA_eec\eeg_pipe\eec_4_b1_10003053_32-epo.fif"
+    # epochs_clean = mne.read_epochs(file_path, preload=True)
+    
+    # 1. Interactive Time-Series Epoch Browser
+    # Allows scrolling across epochs/channels, scaling amplitude with +/- keys
+    # epochs_clean.plot(scalings=dict(eeg=40e-6), n_epochs=5, n_channels=30)
+    
+    # 2. Power Spectral Density (PSD)
+    # Inspect the frequency spectrum to verify 1 Hz drift removal, 60 Hz notch filtering, and alpha peaks
+    epochs_clean.compute_psd(fmin=1, fmax=100).plot()
+    
+    # 3. Sensor Heatmap / Epochs Image
+    # Shows amplitude across all trials for specific regions (e.g., occipital alpha or frontal)
+    epochs_clean.plot_image(picks=['OZ', 'O1', 'O2'])
+    
+    # 4. Global Field Power (GFP) & Evoked Butterfly Plot
+    # epochs_clean.average().plot(spatial_colors=True)
+    plt.show()
+    
+    plt.close('all') # Prevent memory leaks from open figures
+
+    
+
