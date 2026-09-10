@@ -15,8 +15,12 @@ from pyprep.find_noisy_channels import NoisyChannels
 from autoreject import AutoReject
 import traceback
 import matplotlib.pyplot as plt
+from tensorpac import Pac
+from scipy.signal import welch
+from fooof import FOOOF
+# from fooof.analysis import get_band_peak_fm
 
-
+i = 1
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 notch_freqs = [60.0, 80.0]     # FREQUENCY (Hz) TO REMOVE LINE NOISE AND UNKNOWN NOISE FROM SIGNAL  
@@ -96,6 +100,105 @@ def salvage_cnt_data(file_path, data_dtype='<i4'):
     print(f"Successfully recovered {data_2d.shape[1]} samples across {n_channels} channels.")
     return data_2d
 
+
+
+def validate_oscillation_peaks(
+    data, 
+    sfreq, 
+    f_pha_range=(3, 12), 
+    min_peak_height=0.3, 
+    aperiodic_mode='fixed'
+):
+    """
+    Automates oscillation presence checks across epochs using specparam.
+    
+    Parameters
+    ----------
+    data : ndarray, shape (n_epochs, n_times)
+        Accepts:
+      - A single 1D epoch: shape (n_times,) -> returns (bool, float)
+      - A 2D batch of epochs: shape (n_epochs, n_times) -> returns (ndarray, ndarray)
+        Raw electrophysiological time series.
+    sfreq : float
+        Sampling rate in Hz.
+    f_pha_range : tuple (f_min, f_max)
+        Target phase frequency range to validate.
+    min_peak_height : float
+        Minimum peak amplitude above 1/f floor (in log10 units).
+    aperiodic_mode : str
+        'fixed' (standard) or 'knee' (if low frequencies flatten).
+        
+    Returns
+    -------
+    valid_mask : ndarray of bool, shape (n_epochs,)
+        Boolean array where True indicates a genuine spectral peak exists.
+    peak_cf : ndarray of float, shape (n_epochs,)
+        Center frequency of detected peak (NaN if no peak).
+    """
+    # Detect if data is a single 1D epoch
+    is_single_epoch = (data.ndim == 1)
+    epochs = np.atleast_2d(data)
+    n_epochs = epochs.shape[0]    
+    valid_mask = np.zeros(n_epochs, dtype=bool)
+    peak_cf = np.full(n_epochs, np.nan)
+    
+    # Initialize spectral parameterizer
+    fm = FOOOF(
+        peak_width_limits=(1.0, 6.0),
+        min_peak_height=min_peak_height,
+        max_n_peaks=4,
+        aperiodic_mode=aperiodic_mode,
+        verbose=False
+    )
+    
+    for i in range(n_epochs):
+        # # 1. Compute Welch PSD (ensure window preserves low-frequency resolution)
+        # freqs, psd = welch(epochs[i], fs=sfreq, nperseg=int(sfreq * 2), noverlap=int(sfreq))
+        
+        # data shape: (n_epochs, n_channels, n_times) or (n_times,)
+        # 10s window at 256 Hz with bandwidth = 0.5 Hz (NW ≈ 2.5, 4 tapers)
+        psd, freqs = mne.time_frequency.psd_array_multitaper(
+            data, 
+            sfreq=sfreq, 
+            fmin=2, 
+            fmax=35, 
+            bandwidth=0.4,  # spectral smoothing width in Hz
+            adaptive=True, 
+            normalization='full',
+            verbose=False
+        )
+        
+        # 2. Fit periodic + aperiodic model over a relevant window (e.g., 2 to 45 Hz)
+        try:
+            fm.fit(freqs, psd, freq_range=[1, 100])
+        except Exception:
+            continue
+            
+        # 3. Query peaks within the candidate phase band
+        # fm.peak_params_ returns array of [center_frequency, power_over_baseline, bandwidth]
+        peaks = fm.peak_params_
+        if peaks is None or len(peaks) == 0:
+            continue
+            
+        pha_peaks = [
+            p for p in peaks 
+            if f_pha_range[0] <= p[0] <= f_pha_range[1]
+        ]
+        
+        # 4. Check if any peak passes the height threshold
+        if len(pha_peaks) > 0:
+            # Select peak with highest power over baseline
+            best_peak = max(pha_peaks, key=lambda x: x[1])
+            if best_peak[1] >= min_peak_height:
+                valid_mask[i] = True
+                peak_cf[i] = best_peak[0]
+                
+    # Return scalar results if the input was a single 1D epoch
+    if is_single_epoch:
+        return bool(valid_mask[0]), float(peak_cf[0])
+                
+    return valid_mask, peak_cf
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Load the metadata dataframe
 
@@ -118,7 +221,11 @@ meta_df['sample_freq'] = meta_df['eeg_file_name'].str.split('_cnt_').str[1]
 
 
 # OPEN CNT FILE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-i = 4
+# i = 4
+age = meta_df.iloc[i]['age_this_visit']
+sex = meta_df.iloc[i]['sex']
+diag = meta_df.iloc[i]['AUD_this_visit']
+
 cnt_file_name = meta_df.iloc[i].cnt_file_name
 sample_freq = meta_df.iloc[i].sample_freq
 site_name = meta_df.iloc[i].site.lower()
@@ -310,5 +417,75 @@ if do_plot_channels:
     
     plt.close('all') # Prevent memory leaks from open figures
 
-    
 
+
+# # 1. Load the cleaned 10-second epoched FIF file
+# fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
+# epochs_clean = mne.read_epochs(fif_path, preload=True)
+
+# Extract sampling frequency and data: shape -> (n_epochs, n_channels, n_times)
+sfreq = epochs_clean.info['sfreq']
+ch_names = epochs_clean.ch_names
+
+# 2. Group into 30-second intervals
+# Since epochs are 10s each, 3 consecutive epochs equal 30s
+epochs_per_block = 3
+n_blocks = len(epochs_clean) // epochs_per_block
+
+# 3. Initialize Tensorpac PAC object
+# idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
+p = Pac(idpac=(5, 2, 4), f_pha=(3, 12, 0.5, 0.25), f_amp=(25, 50, 1, 0.5))
+
+# Choose a channel to inspect (e.g., 'Cz', 'Fz', or 'Oz')
+target_channel = 'FZ'
+ch_idx = ch_names.index(target_channel)
+
+# 4. Compute and plot comodulograms per 30-second successive interval
+for block_idx in range(n_blocks):
+    start_ep = block_idx * epochs_per_block
+    end_ep = start_ep + epochs_per_block
+    
+    # Slice the 3 epochs for this 30s block
+    # Shape needed for tensorpac: (n_trials, n_times)
+    block_data = epochs_clean.get_data() [start_ep:end_ep, ch_idx, :]
+    
+    fq, psd = welch(block_data[0],fs=raw.info['sfreq'],nperseg=1024)
+    plt.plot(fq,psd)
+    plt.xlim(0,50)
+    plt.ylim(0,3e-11)
+    plt.title(f"{age} {sex} AUD={diag} - {target_channel} - Block {block_idx+1} (30s)")
+    
+    
+    valid_mask, peak_cf = validate_oscillation_peaks(
+        data=block_data[0],
+        sfreq=raw.info['sfreq'],
+        f_pha_range=(4,8),
+        min_peak_height=0.3
+    )
+    print(f"Single Valid Epoch: is_valid={valid_mask}, center_freq={peak_cf:.2f} Hz")
+    
+    
+    
+    # Compute the comodulogram across the pooled trials of this block
+    pac_matrix = p.filterfit(sfreq, block_data)
+    
+    # Plot comodulogram
+    # fig, ax = plt.subplots(figsize=(6, 5))
+    # p.comodulogram(pac_matrix.mean(axis=-1), cmap='viridis', vmin=0, title=f"{target_channel} - Block {block_idx+1} (30s)", ax=ax)
+    # plt.show()
+    # Plot comodulogram using tensorpac's internal axis routing
+    plt.figure(figsize=(6, 5))
+    p.comodulogram(
+        pac_matrix.mean(axis=-1),
+        cmap='viridis',
+        vmin=0,
+        title=f"{target_channel} - Block {block_idx+1} (30s)",
+        subplot=111
+    )
+    plt.show()
+    
+tick_pos = np.arange(0,len(freqs),10)
+plt.plot(psd)
+plt.xticks(tick_pos, labels=freqs[tick_pos])
+plt.xlim(0,100)
+plt.show()
