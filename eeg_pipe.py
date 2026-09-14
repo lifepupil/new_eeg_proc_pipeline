@@ -27,25 +27,60 @@ import scipy.fftpack.helper
 # Alias the deprecated helper attribute to the modern implementation
 scipy.fftpack.helper.next_fast_len = scipy.fftpack.next_fast_len
 
-
-i = 66
+i = 0
 do_preproc = True
+do_quality_checks = True
+do_artifact_removal = True
+# True False
+epoch_dur = 30
+epochs_per_block = 1
 
-epoch_dur = 10
-epochs_per_block = 3
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
-notch_freqs = [60.0, 80.0]     # FREQUENCY (Hz) TO REMOVE LINE NOISE AND UNKNOWN NOISE FROM SIGNAL  
-lowfrq = 1              # LOW PASS FREQUENCY, RECOMMENDED SETTING TO 1 HZ IF USING mne-icalabel
-hifrq = 100             # HIGH PASS FREQUENCY
+
+# Choose channels to inspect (e.g., 'CZ', 'FZ', or 'OZ') for PAC estimates
+PHI_channel = 'FZ'
+AMP_channel = 'POZ'   
+pac_method, pac_surrogate, pac_correction = 2, 2, 4
+n_perm = 500 
+mcp = 'fdr'
+
+phi_start = 3
+phi_stop = 12
+phi_width = 1
+phi_step = 0.5
+
+amp_start = 25
+amp_stop = 50
+amp_width = 2
+amp_step = 1
+
+vmax_pac = 4
+
+notch_freqs = [60.0, 80.0]      # FREQUENCY (Hz) TO REMOVE LINE NOISE AND UNKNOWN NOISE FROM SIGNAL  
+lowfrq = 1                      # LOW PASS FREQUENCY, RECOMMENDED SETTING TO 1 HZ IF USING mne-icalabel
+hifrq = 100                     # HIGH PASS FREQUENCY
 do_plot_channels = False  # TO GENERATE PLOTS OF THE CLEANED EEG SIGNAL
 eye_blink_chans = ['X', 'Y'] # NAMES OF CHANNELS CONTAINING EOG
-# Choose a channel to inspect (e.g., 'Cz', 'Fz', or 'Oz')
-PHI_channel = 'FZ'
-AMP_channel = 'OZ'    
 
-
-
+# PAC METHODS
+# 1 : Mean Vector Length (MVL) 
+# 2 : Modulation Index (MI) 
+# 3 : Heights Ratio (HR) 
+# 4 : ndPAC (see tensorpac.methods.norm_direct_pac())
+# 5 : Phase-Locking Value (PLV) 
+# 6 : Gaussian Copula PAC (GCPAC)
+# PAC SURROGATE DISTRIBUTIONS
+# 0 : No surrogates
+# 1 : Swap phase / amplitude across trials
+# 2 : Swap amplitude time blocks
+# 3 : Time lag
+# PAC CORRECTION METHODS
+# 0 : No normalization
+# 1 : Substract the mean of surrogates
+# 2 : Divide by the mean of surrogates
+# 3 : Substract then divide by the mean of surrogates
+# 4 : Z-score
 
 
 def extract_cnt_name(csv_name):
@@ -307,14 +342,6 @@ def detect_harmonic_pac_peaks(
 
 
 
-
-
-
-
-
-
-
-
 # ~~~~~~~~~~~~~~~~~~~ START ~~~~~~~~~~~~~~~~~~~~~~~~
 # Load the metadata dataframe
 
@@ -416,6 +443,8 @@ if do_preproc:
     # raw.notch_filter(60, filter_length='auto', phase='zero', verbose=False)
     raw.notch_filter(freqs=notch_freqs, filter_length='auto', phase='zero', verbose=False)
     
+if do_quality_checks:
+    
     # SIGNAL QUALITY CHECKS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # Initialize the NoisyChannels object with your filtered data.
     # Setting a random_state ensures the RANSAC spatial correlation step is mathematically reproducible.
@@ -454,7 +483,8 @@ if do_preproc:
         # WE NEED TO APPLY A COMMON AVERAGE REFERENCE TO USE MNE-ICALabel         
     raw = raw.set_eeg_reference("average")
     
-    
+
+if do_artifact_removal:
     # ARTIFACT REMOVAL ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     ica = ICA(
         n_components=15,
@@ -488,13 +518,17 @@ if do_preproc:
     # COMBINING ALL NON-BRAIN ICs AND REMOVING THEM
     ic_to_remove = [*set(exclude_idx)]
     ica.exclude = ic_to_remove
-    raw_clean = ica.apply(raw)
+    raw = ica.apply(raw)
     
     
     # PSEUDO-EPOCHING ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # 1. Pseudo-Epoching: Slice the continuous clean data into fixed-length epochs
     # We are using 4.0 seconds, but 2 to 4 seconds is standard for resting state
-    epochs = mne.make_fixed_length_epochs(raw_clean, duration=epoch_dur, preload=True)
+    epochs = mne.make_fixed_length_epochs(raw, duration=epoch_dur, preload=True)
+
+    
+if 0:
+    
     # THEN REMOVING PREDICTED BAD FOR UserWarning: 
     # channels are marked as bad. These will be ignored. 
     # If you want them to be considered by autoreject please remove them from epochs.info["bads"]
@@ -540,7 +574,8 @@ if do_preproc:
 # # 1. Load the cleaned n-second epoched FIF file
 # fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
 fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
-epochs_clean = mne.read_epochs(fif_path, preload=True)
+# epochs_clean = mne.read_epochs(fif_path, preload=True)
+epochs_clean = epochs
 
 # Extract sampling frequency and data: shape -> (n_epochs, n_channels, n_times)
 sfreq = epochs_clean.info['sfreq']
@@ -550,16 +585,23 @@ ch_names = epochs_clean.ch_names
 # Since epochs are 10s each, 3 consecutive epochs equal 30s
 n_blocks = len(epochs_clean) // epochs_per_block
 
+
 # 3. Initialize Tensorpac PAC object
 # idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
-p = Pac(idpac=(6, 2, 4), f_pha=(3, 12, 1, 0.5), f_amp=(25, 100, 2, 1), dcomplex='wavelet', width=9)
+p = Pac(idpac=(pac_method, pac_surrogate, pac_correction), 
+        f_pha=(phi_start, phi_stop, phi_width, phi_step), 
+        f_amp=(amp_start, amp_stop, amp_width, amp_step), 
+        dcomplex='wavelet', 
+        width=7
+        )
 
 ch1_idx = ch_names.index(PHI_channel)
 ch2_idx = ch_names.index(AMP_channel)
 
 # 4. Compute and plot comodulograms per 30-second successive interval
 for block_idx in range(n_blocks):
-    start_ep = block_idx * epochs_per_block
+    # start_ep = block_idx * epochs_per_block
+    start_ep = block_idx 
     end_ep = start_ep + epochs_per_block
     
     # Slice the 3 epochs for this 30s block
@@ -588,9 +630,22 @@ for block_idx in range(n_blocks):
     
 
     # Compute the comodulogram across the pooled trials of this block
-    pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_PHI, n_perm=200, p=0.05, mcp='fdr')
-    pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_PHI, n_perm=200, p=0.05, mcp='fdr')
-
+    pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_PHI, n_perm=n_perm, p=0.05, mcp='fdr')
+    pval12 = p.infer_pvalues(p=0.05, mcp=mcp)
+    # pac_s12 = pac_matrix12.copy().mean(axis=-1)
+    xpac = pac_matrix12.squeeze()
+    pac_s12 = xpac.copy()
+    pac_s12[pval12>0.05] = np.nan
+    
+    pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_PHI, n_perm=n_perm, p=0.05, mcp='fdr')
+    # pval21 = p.infer_pvalues(p=0.05, mcp='fdr')
+    # pac_s21 = pac_matrix21.copy().mean(axis=-1)
+    # pac_s21[pval21>0.05] = np.nan
+    
+    
+    c1 = pac_matrix12.mean(axis=-1)
+    c2 = pac_matrix21.mean(axis=-1)
+    c3 = c1 - c2
     
     # # -------------------------------------------------------------------------
     # # 4. Run the Harmonic Detector Function
@@ -662,29 +717,49 @@ for block_idx in range(n_blocks):
 
     
     # Plot comodulogram using tensorpac's internal axis routing
-    plt.figure(figsize=(6, 10))
-    plt.subplot(2,1,1)
+    plt.figure(figsize=(10, 6))
+    plt.subplot(2,2,1)
     p.comodulogram(
         pac_matrix12.mean(axis=-1),
         cmap='viridis',
         vmin=0,
-        vmax=3,
+        vmax=vmax_pac,
         title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
         subplot=111
     )
-    plt.subplot(2,1,2)
+    plt.subplot(2,2,2)
+    p.comodulogram(
+        c3,
+        cmap='seismic',
+        vmin=-1,
+        vmax=1,
+        title=f"{PHI_channel} - {AMP_channel}",
+        subplot=111
+    )
+    plt.subplot(2,2,3)
     p.comodulogram(
         pac_matrix21.mean(axis=-1),
         cmap='viridis',
         vmin=0,
-        vmax=3,
+        vmax=vmax_pac,
         title=f"phase {AMP_channel} and amplitude {PHI_channel} - Block {block_idx+1} ({epoch_dur}s)",
         subplot=111
     )
+    plt.subplot(2,2,4)
+    p.comodulogram(
+        pval12,
+        cmap='viridis',
+        vmin=0.0,
+        vmax=1.0,
+        title=f"p-value min {np.nanmin(pac_s12)}",
+        subplot=111
+    )    
     plt.show()
-    
+
+
 # tick_pos = np.arange(0,len(freqs),10)
 # plt.plot(psd)
 # plt.xticks(tick_pos, labels=freqs[tick_pos])
 # plt.xlim(0,100)
 # plt.show()
+
