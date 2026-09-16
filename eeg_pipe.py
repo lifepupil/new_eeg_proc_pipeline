@@ -42,26 +42,26 @@ do_AutoReject = False
 do_pac = True
 #  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~DEBUG
 
-epoch_dur = 30
+epoch_dur = 10
 epochs_per_block = 1
 
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 
 # Choose channels to inspect (e.g., 'CZ', 'FZ', or 'OZ') for PAC estimates
-PHI_channel = 'FZ'
-AMP_channel = 'POZ'   
-pac_method, pac_surrogate, pac_correction = 2, 2, 1
+PHI_channel = 'F3'
+AMP_channel = 'O1'   
+pac_method, pac_surrogate, pac_correction = 6, 2, 4
 n_perm = 500
-mcp = 'fdr'
+mcp = 'fdr' # maxstat bonferroni fdr
 
-phi_start = 1
+phi_start = 7
 phi_stop = 13
 phi_width = 1
 phi_step = 0.5
 
-amp_start = 4
-amp_stop = 50
+amp_start = 20
+amp_stop = 60
 amp_width = 2
 amp_step = 1
 
@@ -646,21 +646,29 @@ if do_pac:
         pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
         pval12 = p.infer_pvalues(p=1.0, mcp=mcp)
         print(f"Minimum p-value {pval12.min()}")
+        xpac12 = pac_matrix12.mean(axis=-1)
+        xpac_smean12 = xpac12[pval12<=0.05].mean()
 
-        surro = p.surrogates.squeeze()
-        print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro.shape}")
-        surro_max = surro.max(axis=(1, 2))
+        surro12 = p.surrogates.squeeze()
+        print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro12.shape}")
+        surro_max12 = surro12.max(axis=(1, 2))
         # plt.hist(surro_max)
-        print(f"Surrogates min, max : {surro_max.min()}, {surro_max.max()}")
+        print(f"Surrogates min, max : {surro_max12.min()}, {surro_max12.max()}")
+        surro_max_z12 = (surro_max12 - np.mean(surro_max12)) / np.std(surro_max12)
 
         
-        pac_s12 = pac_matrix12.copy().mean(axis=-1)
-        # xpac = pac_matrix12.squeeze()
-        # pac_s12 = pac_matrix12.copy()
-        # pac_s12[pval12>0.05] = np.nan
-        xpac_smean = pac_s12[pval12<=pval12.min()].mean()
-        # xpac_smean = xpac[pval12 < .05].nanmean()
-        
+        pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
+        pval21 = p.infer_pvalues(p=1.0, mcp=mcp)
+        print(f"Minimum p-value {pval21.min()}")
+        xpac21 = pac_matrix21.mean(axis=-1)
+        xpac_smean21 = xpac21[pval21<=0.05].mean()
+
+        surro21 = p.surrogates.squeeze()
+        print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro21.shape}")
+        surro_max21 = surro21.max(axis=(1, 2))
+        # plt.hist(surro_max)
+        print(f"Surrogates min, max : {surro_max21.min()}, {surro_max21.max()}")
+        surro_max_z21 = (surro_max21 - np.mean(surro_max21)) / np.std(surro_max21)
 
         
         # # -------------------------------------------------------------------------
@@ -797,13 +805,27 @@ if do_pac:
         #     over='lightgray',
         #     subplot=111
         # )    
-        plt.hist(surro_max, bins=20)
-        # plt.xlim(0,1)
-        plt.title('Corrected distribution of surrogates')
-        # if pval12.min()<=0.05:
-        plt.axvline(xpac_smean, lw=2, color='red')
-
-
+        
+        plt.hist(surro_max_z12, bins=20, alpha=0.7, color="steelblue", density=True)
+        # # xpac_smean is already in z-score units
+        # plt.axvline(
+        #     xpac_smean12, lw=2, color="red", label=f"Mean Z-PAC ({xpac_smean12:.2f} $\sigma$)"
+        # )
+        # plt.title("Z-Score Null vs. Observed Z-PAC")
+        # plt.xlabel("Standard Deviations ($\sigma$)")
+        # plt.ylabel("Density")
+        # plt.legend()
+        
+        plt.hist(surro_max_z21, bins=20, alpha=0.7, color="steelblue", density=True)
+        # xpac_smean is already in z-score units
+        plt.axvline(
+            xpac_smean21, lw=2, color="red", label=f"Mean Z-PAC ({xpac_smean21:.2f} $\sigma$)"
+        )
+        plt.title("Z-Score Null vs. Observed Z-PAC")
+        plt.xlabel("Standard Deviations ($\sigma$)")
+        plt.ylabel("Density")
+        plt.legend()
+        
         plt.show()
         plt.close()
 
