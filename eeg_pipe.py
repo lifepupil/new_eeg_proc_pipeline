@@ -22,16 +22,26 @@ from fooof import FOOOF
 from scipy.ndimage import maximum_filter
 
 # TO DEAL WITH DEPRECATION WARNINGS
+import warnings
 import scipy.fftpack
 import scipy.fftpack.helper
 # Alias the deprecated helper attribute to the modern implementation
 scipy.fftpack.helper.next_fast_len = scipy.fftpack.next_fast_len
+# Suppress DeprecationWarnings from tensorpac internals
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorpac")
+# Suppress scipy-specific helper deprecation
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="scipy")
 
+# DEBUG ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 i = 0
+# True False
 do_preproc = True
 do_quality_checks = True
 do_artifact_removal = True
-# True False
+do_AutoReject = False
+do_pac = True
+#  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~DEBUG
+
 epoch_dur = 30
 epochs_per_block = 1
 
@@ -41,16 +51,16 @@ WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 # Choose channels to inspect (e.g., 'CZ', 'FZ', or 'OZ') for PAC estimates
 PHI_channel = 'FZ'
 AMP_channel = 'POZ'   
-pac_method, pac_surrogate, pac_correction = 2, 2, 4
-n_perm = 500 
+pac_method, pac_surrogate, pac_correction = 2, 2, 1
+n_perm = 500
 mcp = 'fdr'
 
-phi_start = 3
-phi_stop = 12
+phi_start = 1
+phi_stop = 13
 phi_width = 1
 phi_step = 0.5
 
-amp_start = 25
+amp_start = 4
 amp_stop = 50
 amp_width = 2
 amp_step = 1
@@ -527,7 +537,7 @@ if do_artifact_removal:
     epochs = mne.make_fixed_length_epochs(raw, duration=epoch_dur, preload=True)
 
     
-if 0:
+if do_AutoReject:
     
     # THEN REMOVING PREDICTED BAD FOR UserWarning: 
     # channels are marked as bad. These will be ignored. 
@@ -570,191 +580,232 @@ if 0:
         plt.close('all') # Prevent memory leaks from open figures
     
 
+if do_pac:
+    # # 1. Load the cleaned n-second epoched FIF file
+    # fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
+    fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
+    if 'epochs' in locals():
+        epochs_clean = epochs
+    else:
+        epochs_clean = mne.read_epochs(fif_path, preload=True)
 
-# # 1. Load the cleaned n-second epoched FIF file
-# fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
-fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
-# epochs_clean = mne.read_epochs(fif_path, preload=True)
-epochs_clean = epochs
+    
+    # Extract sampling frequency and data: shape -> (n_epochs, n_channels, n_times)
+    sfreq = epochs_clean.info['sfreq']
+    ch_names = epochs_clean.ch_names
+    
+    # 2. Group into 30-second intervals
+    # Since epochs are 10s each, 3 consecutive epochs equal 30s
+    n_blocks = len(epochs_clean) // epochs_per_block
+    
+    
+    # 3. Initialize Tensorpac PAC object
+    # idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
+    p = Pac(idpac=(pac_method, pac_surrogate, pac_correction), 
+            f_pha=(phi_start, phi_stop, phi_width, phi_step), 
+            f_amp=(amp_start, amp_stop, amp_width, amp_step), 
+            dcomplex='wavelet', 
+            width=7
+            )
+    
+    ch1_idx = ch_names.index(PHI_channel)
+    ch2_idx = ch_names.index(AMP_channel)
+    
+    # 4. Compute and plot comodulograms per 30-second successive interval
+    for block_idx in range(n_blocks):
+        start_ep = block_idx * epochs_per_block
+        # start_ep = block_idx 
+        end_ep = start_ep + epochs_per_block
+        
+        # Slice the 3 epochs for this 30s block
+        # Shape needed for tensorpac: (n_trials, n_times)
+        block_data_PHI = epochs_clean.get_data() [start_ep:end_ep, ch1_idx, :][0]
+        block_data_AMP = epochs_clean.get_data() [start_ep:end_ep, ch2_idx, :][0]
+        
+        # fq, psd = welch(block_data,
+        #                 fs=sfreq,
+        #                 nperseg=int(sfreq*2),
+        #                 noverlap=int(sfreq)
+        #                 )
+        # plt.plot(fq,psd)
+        # plt.xlim(0,50)
+        # plt.ylim(0,3e-11)
+        # plt.title(f"{age} {sex} AUD={diag} - {PHI_channel} - Block {block_idx+1} (30s)")
+        
+        
+        # valid_mask, peak_cf = validate_oscillation_peaks(
+        #     data=block_data[0],
+        #     sfreq=raw.info['sfreq'],
+        #     f_pha_range=(4,8),
+        #     min_peak_height=0.3
+        # )
+        # print(f"Single Valid Epoch: is_valid={valid_mask}, center_freq={peak_cf:.2f} Hz")
+        
+    
+        # Compute the comodulogram across the pooled trials of this block
+        pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
+        pval12 = p.infer_pvalues(p=1.0, mcp=mcp)
+        print(f"Minimum p-value {pval12.min()}")
 
-# Extract sampling frequency and data: shape -> (n_epochs, n_channels, n_times)
-sfreq = epochs_clean.info['sfreq']
-ch_names = epochs_clean.ch_names
+        surro = p.surrogates.squeeze()
+        print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro.shape}")
+        surro_max = surro.max(axis=(1, 2))
+        # plt.hist(surro_max)
+        print(f"Surrogates min, max : {surro_max.min()}, {surro_max.max()}")
 
-# 2. Group into 30-second intervals
-# Since epochs are 10s each, 3 consecutive epochs equal 30s
-n_blocks = len(epochs_clean) // epochs_per_block
+        
+        pac_s12 = pac_matrix12.copy().mean(axis=-1)
+        # xpac = pac_matrix12.squeeze()
+        # pac_s12 = pac_matrix12.copy()
+        # pac_s12[pval12>0.05] = np.nan
+        xpac_smean = pac_s12[pval12<=pval12.min()].mean()
+        # xpac_smean = xpac[pval12 < .05].nanmean()
+        
 
-
-# 3. Initialize Tensorpac PAC object
-# idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
-p = Pac(idpac=(pac_method, pac_surrogate, pac_correction), 
-        f_pha=(phi_start, phi_stop, phi_width, phi_step), 
-        f_amp=(amp_start, amp_stop, amp_width, amp_step), 
-        dcomplex='wavelet', 
-        width=7
+        
+        # # -------------------------------------------------------------------------
+        # # 4. Run the Harmonic Detector Function
+        # # -------------------------------------------------------------------------
+        # # Extract center frequencies
+        # f_pha_vec = p.xvec
+        # f_amp_vec = p.yvec
+        # detected_peaks = detect_harmonic_pac_peaks(
+        #     pac_matrix=pac_matrix,
+        #     f_pha_vec=f_pha_vec,
+        #     f_amp_vec=f_amp_vec,
+        #     psd_freqs=fq,
+        #     psd_power=psd,
+        #     pac_threshold=2.0,       # Significant z-score threshold
+        #     harmonic_tolerance=0.08  # Within 8% of an exact integer multiple
+        # )
+        
+        
+        # # Print tabular report
+        # print(f"{'f_pha (Hz)':>10} | {'f_amp (Hz)':>10} | {'Z-PAC':>7} | {'Ratio':>6} | {'Classification'}")
+        # print("-" * 75)
+        # for res in detected_peaks:
+        #     print(
+        #         f"{res['f_pha']:10.1f} | "
+        #         f"{res['f_amp']:10.1f} | "
+        #         f"{res['pac_value']:7.2f} | "
+        #         f"{res['harmonic_ratio']:6.2f} | "
+        #         f"{res['classification']}"
+        #     )
+        
+        # # -------------------------------------------------------------------------
+        # # 5. Visual Inspection Plot
+        # # -------------------------------------------------------------------------
+        # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+        
+        # # Plot PSD
+        # ax1.semilogy(fq, psd, color='black', lw=1.5)
+        # ax1.set_xlim(2, 60)
+        # ax1.set_title("Power Spectral Density")
+        # ax1.set_xlabel("Frequency (Hz)")
+        # ax1.set_ylabel("Power (linear/Welch)")
+        # ax1.axvline(10.0, color='crimson', linestyle='--', label='Alpha (10 Hz)')
+        # ax1.axvline(20.0, color='orange', linestyle=':', label='2nd Harmonic (20 Hz)')
+        # ax1.axvline(30.0, color='orange', linestyle=':', label='3rd Harmonic (30 Hz)')
+        # ax1.legend(loc='upper right')
+        
+        # # Plot Comodulogram
+        # im = ax2.pcolormesh(f_pha_vec, f_amp_vec, pac_matrix, cmap='viridis', shading='auto')
+        # fig.colorbar(im, ax=ax2, label='Z-scored PAC')
+        # ax2.set_title("Comodulogram (Spurious Harmonics)")
+        # ax2.set_xlabel("Phase Frequency (Hz)")
+        # ax2.set_ylabel("Amplitude Frequency (Hz)")
+        
+        # # Mark detected harmonic peaks on the comodulogram
+        # for res in detected_peaks:
+        #     if res['is_harmonic_candidate']:
+        #         ax2.scatter(res['f_pha'], res['f_amp'], facecolors='none', edgecolors='red', s=120, lw=2)
+        
+        # plt.tight_layout()
+        # plt.show()
+        
+        
+        
+        # # Plot comodulogram
+        # fig, ax = plt.subplots(figsize=(6, 5))
+        # p.comodulogram(pac_matrix.mean(axis=-1), cmap='viridis', vmin=0, title=f"{PHI_channel} - Block {block_idx+1} (30s)", ax=ax)
+        # plt.show()
+        # plt.title(f"{age} {sex} AUD={diag} - {PHI_channel} - Block {block_idx+1} (30s)")
+    
+        pac12 = pac_matrix12.mean(axis=-1)
+        # Plot comodulogram using tensorpac's internal axis routing
+        plt.figure(figsize=(10, 6))
+        plt.subplot(2,2,1)
+        p.comodulogram(
+            pac12,
+            cmap='viridis',
+            vmin=pac12.min(),
+            vmax=pac12.max(),
+            title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
+            subplot=111
         )
+        
+        plt.subplot(2,2,2)
+        # plt.plot(block_data_PHI)
+        # plt.title(f"phase channel {PHI_channel}")
+        
+        # p.comodulogram(
+        #     c3,
+        #     cmap='seismic',
+        #     vmin=-1,
+        #     vmax=1,
+        #     title=f"{PHI_channel} - {AMP_channel}",
+        #     subplot=111
+        # )
+        p.comodulogram(
+            pval12,
+            cmap='seismic',
+            vmin=0,
+            vmax=1,
+            title=f"p-values (min={pval12.min()})",
+            subplot=111
+        )
+        
+        plt.subplot(2,2,3)
+        pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, p=0.05, mcp=mcp)
+        # pval21 = p.infer_pvalues(p=0.05, mcp=mcp)
+        # pac_s21 = pac_matrix21.copy().mean(axis=-1)
+        # pac_s21[pval21>0.05] = np.nan
+        
+        
+        # c1 = pac_matrix12.mean(axis=-1)
+        # c2 = pac_matrix21.mean(axis=-1)
+        # c3 = c1 - c2
+        
+        p.comodulogram(
+            pac_matrix21.mean(axis=-1),
+            cmap='viridis',
+            vmin=0,
+            vmax=vmax_pac,
+            title=f"phase {AMP_channel} and amplitude {PHI_channel} - Block {block_idx+1} ({epoch_dur}s)",
+            subplot=111
+        )
+        
+        plt.subplot(2,2,4)
+        # plt.plot(block_data_AMP)
+        # plt.title(f"amplitude channel {AMP_channel}")
+        # p.comodulogram(
+        #     pval12,
+        #     cmap='viridis',
+        #     vmin=1. / n_perm,
+        #     vmax=0.05,
+        #     title=f"p-value min {np.nanmin(pac_s12)}",
+        #     over='lightgray',
+        #     subplot=111
+        # )    
+        plt.hist(surro_max, bins=20)
+        # plt.xlim(0,1)
+        plt.title('Corrected distribution of surrogates')
+        # if pval12.min()<=0.05:
+        plt.axvline(xpac_smean, lw=2, color='red')
 
-ch1_idx = ch_names.index(PHI_channel)
-ch2_idx = ch_names.index(AMP_channel)
 
-# 4. Compute and plot comodulograms per 30-second successive interval
-for block_idx in range(n_blocks):
-    # start_ep = block_idx * epochs_per_block
-    start_ep = block_idx 
-    end_ep = start_ep + epochs_per_block
-    
-    # Slice the 3 epochs for this 30s block
-    # Shape needed for tensorpac: (n_trials, n_times)
-    block_data_PHI = epochs_clean.get_data() [start_ep:end_ep, ch1_idx, :]
-    block_data_AMP = epochs_clean.get_data() [start_ep:end_ep, ch2_idx, :]
-    
-    # fq, psd = welch(block_data,
-    #                 fs=sfreq,
-    #                 nperseg=int(sfreq*2),
-    #                 noverlap=int(sfreq)
-    #                 )
-    # plt.plot(fq,psd)
-    # plt.xlim(0,50)
-    # plt.ylim(0,3e-11)
-    # plt.title(f"{age} {sex} AUD={diag} - {PHI_channel} - Block {block_idx+1} (30s)")
-    
-    
-    # valid_mask, peak_cf = validate_oscillation_peaks(
-    #     data=block_data[0],
-    #     sfreq=raw.info['sfreq'],
-    #     f_pha_range=(4,8),
-    #     min_peak_height=0.3
-    # )
-    # print(f"Single Valid Epoch: is_valid={valid_mask}, center_freq={peak_cf:.2f} Hz")
-    
-
-    # Compute the comodulogram across the pooled trials of this block
-    pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_PHI, n_perm=n_perm, p=0.05, mcp='fdr')
-    pval12 = p.infer_pvalues(p=0.05, mcp=mcp)
-    # pac_s12 = pac_matrix12.copy().mean(axis=-1)
-    xpac = pac_matrix12.squeeze()
-    pac_s12 = xpac.copy()
-    pac_s12[pval12>0.05] = np.nan
-    
-    pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_PHI, n_perm=n_perm, p=0.05, mcp='fdr')
-    # pval21 = p.infer_pvalues(p=0.05, mcp='fdr')
-    # pac_s21 = pac_matrix21.copy().mean(axis=-1)
-    # pac_s21[pval21>0.05] = np.nan
-    
-    
-    c1 = pac_matrix12.mean(axis=-1)
-    c2 = pac_matrix21.mean(axis=-1)
-    c3 = c1 - c2
-    
-    # # -------------------------------------------------------------------------
-    # # 4. Run the Harmonic Detector Function
-    # # -------------------------------------------------------------------------
-    # # Extract center frequencies
-    # f_pha_vec = p.xvec
-    # f_amp_vec = p.yvec
-    # detected_peaks = detect_harmonic_pac_peaks(
-    #     pac_matrix=pac_matrix,
-    #     f_pha_vec=f_pha_vec,
-    #     f_amp_vec=f_amp_vec,
-    #     psd_freqs=fq,
-    #     psd_power=psd,
-    #     pac_threshold=2.0,       # Significant z-score threshold
-    #     harmonic_tolerance=0.08  # Within 8% of an exact integer multiple
-    # )
-    
-    
-    # # Print tabular report
-    # print(f"{'f_pha (Hz)':>10} | {'f_amp (Hz)':>10} | {'Z-PAC':>7} | {'Ratio':>6} | {'Classification'}")
-    # print("-" * 75)
-    # for res in detected_peaks:
-    #     print(
-    #         f"{res['f_pha']:10.1f} | "
-    #         f"{res['f_amp']:10.1f} | "
-    #         f"{res['pac_value']:7.2f} | "
-    #         f"{res['harmonic_ratio']:6.2f} | "
-    #         f"{res['classification']}"
-    #     )
-    
-    # # -------------------------------------------------------------------------
-    # # 5. Visual Inspection Plot
-    # # -------------------------------------------------------------------------
-    # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
-    
-    # # Plot PSD
-    # ax1.semilogy(fq, psd, color='black', lw=1.5)
-    # ax1.set_xlim(2, 60)
-    # ax1.set_title("Power Spectral Density")
-    # ax1.set_xlabel("Frequency (Hz)")
-    # ax1.set_ylabel("Power (linear/Welch)")
-    # ax1.axvline(10.0, color='crimson', linestyle='--', label='Alpha (10 Hz)')
-    # ax1.axvline(20.0, color='orange', linestyle=':', label='2nd Harmonic (20 Hz)')
-    # ax1.axvline(30.0, color='orange', linestyle=':', label='3rd Harmonic (30 Hz)')
-    # ax1.legend(loc='upper right')
-    
-    # # Plot Comodulogram
-    # im = ax2.pcolormesh(f_pha_vec, f_amp_vec, pac_matrix, cmap='viridis', shading='auto')
-    # fig.colorbar(im, ax=ax2, label='Z-scored PAC')
-    # ax2.set_title("Comodulogram (Spurious Harmonics)")
-    # ax2.set_xlabel("Phase Frequency (Hz)")
-    # ax2.set_ylabel("Amplitude Frequency (Hz)")
-    
-    # # Mark detected harmonic peaks on the comodulogram
-    # for res in detected_peaks:
-    #     if res['is_harmonic_candidate']:
-    #         ax2.scatter(res['f_pha'], res['f_amp'], facecolors='none', edgecolors='red', s=120, lw=2)
-    
-    # plt.tight_layout()
-    # plt.show()
-    
-    
-    
-    # # Plot comodulogram
-    # fig, ax = plt.subplots(figsize=(6, 5))
-    # p.comodulogram(pac_matrix.mean(axis=-1), cmap='viridis', vmin=0, title=f"{PHI_channel} - Block {block_idx+1} (30s)", ax=ax)
-    # plt.show()
-    # plt.title(f"{age} {sex} AUD={diag} - {PHI_channel} - Block {block_idx+1} (30s)")
-
-    
-    # Plot comodulogram using tensorpac's internal axis routing
-    plt.figure(figsize=(10, 6))
-    plt.subplot(2,2,1)
-    p.comodulogram(
-        pac_matrix12.mean(axis=-1),
-        cmap='viridis',
-        vmin=0,
-        vmax=vmax_pac,
-        title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
-        subplot=111
-    )
-    plt.subplot(2,2,2)
-    p.comodulogram(
-        c3,
-        cmap='seismic',
-        vmin=-1,
-        vmax=1,
-        title=f"{PHI_channel} - {AMP_channel}",
-        subplot=111
-    )
-    plt.subplot(2,2,3)
-    p.comodulogram(
-        pac_matrix21.mean(axis=-1),
-        cmap='viridis',
-        vmin=0,
-        vmax=vmax_pac,
-        title=f"phase {AMP_channel} and amplitude {PHI_channel} - Block {block_idx+1} ({epoch_dur}s)",
-        subplot=111
-    )
-    plt.subplot(2,2,4)
-    p.comodulogram(
-        pval12,
-        cmap='viridis',
-        vmin=0.0,
-        vmax=1.0,
-        title=f"p-value min {np.nanmin(pac_s12)}",
-        subplot=111
-    )    
-    plt.show()
+        plt.show()
+        plt.close()
 
 
 # tick_pos = np.arange(0,len(freqs),10)
