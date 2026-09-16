@@ -43,25 +43,25 @@ do_pac = True
 #  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~DEBUG
 
 epoch_dur = 10
-epochs_per_block = 1
+epochs_per_block = 12
 
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 
 # Choose channels to inspect (e.g., 'CZ', 'FZ', or 'OZ') for PAC estimates
 PHI_channel = 'F3'
-AMP_channel = 'O1'   
+AMP_channel = 'F4'   
 pac_method, pac_surrogate, pac_correction = 6, 2, 4
 n_perm = 500
 mcp = 'fdr' # maxstat bonferroni fdr
 
 phi_start = 7
-phi_stop = 13
+phi_stop = 14
 phi_width = 1
 phi_step = 0.5
 
-amp_start = 20
-amp_stop = 60
+amp_start = 24
+amp_stop = 52
 amp_width = 2
 amp_step = 1
 
@@ -657,7 +657,7 @@ if do_pac:
         surro_max_z12 = (surro_max12 - np.mean(surro_max12)) / np.std(surro_max12)
 
         
-        pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
+        pac_matrix21 = p.filterfit(sfreq, block_data_AMP, block_data_PHI, n_perm=n_perm, n_jobs=-1,random_state=42)
         pval21 = p.infer_pvalues(p=1.0, mcp=mcp)
         print(f"Minimum p-value {pval21.min()}")
         xpac21 = pac_matrix21.mean(axis=-1)
@@ -739,15 +739,14 @@ if do_pac:
         # plt.show()
         # plt.title(f"{age} {sex} AUD={diag} - {PHI_channel} - Block {block_idx+1} (30s)")
     
-        pac12 = pac_matrix12.mean(axis=-1)
         # Plot comodulogram using tensorpac's internal axis routing
         plt.figure(figsize=(10, 6))
         plt.subplot(2,2,1)
         p.comodulogram(
-            pac12,
+            pac_matrix12.mean(axis=-1),
             cmap='viridis',
-            vmin=pac12.min(),
-            vmax=pac12.max(),
+            vmin=0,
+            vmax=4,
             title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
             subplot=111
         )
@@ -774,7 +773,7 @@ if do_pac:
         )
         
         plt.subplot(2,2,3)
-        pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, p=0.05, mcp=mcp)
+        # pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, p=0.05, mcp=mcp)
         # pval21 = p.infer_pvalues(p=0.05, mcp=mcp)
         # pac_s21 = pac_matrix21.copy().mean(axis=-1)
         # pac_s21[pval21>0.05] = np.nan
@@ -796,15 +795,14 @@ if do_pac:
         plt.subplot(2,2,4)
         # plt.plot(block_data_AMP)
         # plt.title(f"amplitude channel {AMP_channel}")
-        # p.comodulogram(
-        #     pval12,
-        #     cmap='viridis',
-        #     vmin=1. / n_perm,
-        #     vmax=0.05,
-        #     title=f"p-value min {np.nanmin(pac_s12)}",
-        #     over='lightgray',
-        #     subplot=111
-        # )    
+        p.comodulogram(
+            pval21,
+            cmap='seismic',
+            vmin=0,
+            vmax=1,
+            title=f"p-values (min={pval21.min()})",
+            subplot=111
+        )    
         
         plt.hist(surro_max_z12, bins=20, alpha=0.7, color="steelblue", density=True)
         # # xpac_smean is already in z-score units
@@ -816,15 +814,15 @@ if do_pac:
         # plt.ylabel("Density")
         # plt.legend()
         
-        plt.hist(surro_max_z21, bins=20, alpha=0.7, color="steelblue", density=True)
-        # xpac_smean is already in z-score units
-        plt.axvline(
-            xpac_smean21, lw=2, color="red", label=f"Mean Z-PAC ({xpac_smean21:.2f} $\sigma$)"
-        )
-        plt.title("Z-Score Null vs. Observed Z-PAC")
-        plt.xlabel("Standard Deviations ($\sigma$)")
-        plt.ylabel("Density")
-        plt.legend()
+        # plt.hist(surro_max_z21, bins=20, alpha=0.7, color="steelblue", density=True)
+        # # xpac_smean is already in z-score units
+        # plt.axvline(
+        #     xpac_smean21, lw=2, color="red", label=f"Mean Z-PAC ({xpac_smean21:.2f} $\sigma$)"
+        # )
+        # plt.title("Z-Score Null vs. Observed Z-PAC")
+        # plt.xlabel("Standard Deviations ($\sigma$)")
+        # plt.ylabel("Density")
+        # plt.legend()
         
         plt.show()
         plt.close()
