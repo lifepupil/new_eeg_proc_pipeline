@@ -7,19 +7,29 @@ Created on Thu Jun 25 20:32:04 2026
 
 import numpy as np
 import pandas as pd
-# import os
+import matplotlib.pyplot as plt
+
 import mne
 from mne.preprocessing import ICA
 from mne_icalabel import label_components
+
 from pyprep.find_noisy_channels import NoisyChannels
 from autoreject import AutoReject
 import traceback
-import matplotlib.pyplot as plt
 from tensorpac import Pac
 from scipy.signal import welch
 from fooof import FOOOF
 # from fooof.analysis import get_band_peak_fm
 from scipy.ndimage import maximum_filter
+
+# from bycycle.cyclepoints import _infer_zerocrossings
+from bycycle.features import compute_features
+from scipy.signal import hilbert
+from bycycle import Bycycle
+from bycycle.plts import plot_cyclepoints_array
+from bycycle.cyclepoints import find_extrema, find_zerox
+from neurodsp.filt import filter_signal
+
 
 # TO DEAL WITH DEPRECATION WARNINGS
 import warnings
@@ -40,17 +50,19 @@ do_quality_checks = True
 do_artifact_removal = True
 do_AutoReject = False
 do_pac = True
+do_bycycle = False
+do_MWT_phase_plane = False
 #  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~DEBUG
 
 epoch_dur = 10
-epochs_per_block = 12
+epochs_per_block = 1
 
 DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 
 # Choose channels to inspect (e.g., 'CZ', 'FZ', or 'OZ') for PAC estimates
 PHI_channel = 'F3'
-AMP_channel = 'F4'   
+AMP_channel = 'O1'   
 pac_method, pac_surrogate, pac_correction = 6, 2, 4
 n_perm = 500
 mcp = 'fdr' # maxstat bonferroni fdr
@@ -580,15 +592,23 @@ if do_AutoReject:
         plt.close('all') # Prevent memory leaks from open figures
     
 
-if do_pac:
-    # # 1. Load the cleaned n-second epoched FIF file
-    # fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
-    fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
-    if 'epochs' in locals():
-        epochs_clean = epochs
-    else:
-        epochs_clean = mne.read_epochs(fif_path, preload=True)
+# # 1. Load the cleaned n-second epoched FIF file
+# fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
+fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
+if 'epochs' in locals():
+    epochs_clean = epochs
+else:
+    epochs_clean = mne.read_epochs(fif_path, preload=True)
 
+# Extract data: shape is (n_epochs, n_channels, n_times)
+epoch_data = epochs_clean.get_data()
+
+
+ch1_idx = epochs_clean.ch_names.index(PHI_channel)
+ch2_idx = epochs_clean.ch_names.index(AMP_channel)
+
+
+if do_pac:
     
     # Extract sampling frequency and data: shape -> (n_epochs, n_channels, n_times)
     sfreq = epochs_clean.info['sfreq']
@@ -608,8 +628,7 @@ if do_pac:
             width=7
             )
     
-    ch1_idx = ch_names.index(PHI_channel)
-    ch2_idx = ch_names.index(AMP_channel)
+
     
     # 4. Compute and plot comodulograms per 30-second successive interval
     for block_idx in range(n_blocks):
@@ -828,9 +847,230 @@ if do_pac:
         plt.close()
 
 
-# tick_pos = np.arange(0,len(freqs),10)
-# plt.plot(psd)
-# plt.xticks(tick_pos, labels=freqs[tick_pos])
-# plt.xlim(0,100)
-# plt.show()
+if do_bycycle:
+    sfreq = epochs_clean.info["sfreq"]
+    ch_names = epochs_clean.ch_names
+    ch1_idx = ch_names.index(PHI_channel)
+    ch2_idx = ch_names.index(AMP_channel)
+    phi_start, phi_stop = 8,12
+    amp_start, amp_stop = 40,50
+    
+    # 1. Parameterize candidate cycle definitions
+    f_range = (phi_start, phi_stop)  # Phase carrier band (e.g., alpha: 7-14 Hz)
+    amp_band = (
+        amp_start,
+        amp_stop,
+    )  # Amplitude band (e.g., gamma: 24-52 Hz)
 
+    # Burst detection thresholds to restrict PAC to genuine oscillatory bursts
+    threshold_kwargs = {
+        "amp_fraction_threshold": 0.3,
+        "amp_consistency_threshold": 0.4,
+        "period_consistency_threshold": 0.5,
+        "monotonicity_threshold": 0.8,
+        "min_n_cycles": 3,
+    }
+
+    # # Extract clean continuous data across epochs for both channels
+    # # Shape: (n_samples,)
+    # sig_phase = epochs_clean.get_data()[:, ch1_idx, :].reshape(-1)
+    # sig_amp_target = epochs_clean.get_data()[:, ch2_idx, :].reshape(-1)
+    
+    # sig_phase = np.concatenate([epoch_data[0,ch1_idx,:], epoch_data[1,ch1_idx,:]])
+    # sig_amp_target = np.concatenate([epoch_data[0,ch2_idx,:], epoch_data[1,ch2_idx,:]])
+    ep_i = 0
+    sig_phase = epoch_data[ep_i,ch1_idx,:]
+    sig_amp_target = epoch_data[ep_i,ch2_idx,:]
+    
+    # Apply a lowpass filter at 25Hz
+    fc = 25
+    filter_seconds = 0.5
+    
+    # sig_phase_low = filter_signal(sig_phase, sfreq, 'lowpass', fc, n_seconds=filter_seconds, remove_edges=False)
+    # sig_amp_target_low = filter_signal(sig_amp_target, sfreq, 'lowpass', fc, n_seconds=filter_seconds, remove_edges=False)
+
+    # f_alpha = (8,12)
+    # f_theta = (4,8)
+    # thresholds = {
+    #     'amp_fraction': .3,
+    #     'amp_consistency': .4,
+    #     'period_consistency': .5,
+    #     'monotonicity': .8,
+    #     'min_n_cycles': 3
+    # }
+    
+    # bm = Bycycle(thresholds=thresholds)
+    # bm.fit(sig, sfreq, f_alpha)
+    
+    # peaks = bm.df_features['sample_peak'].values
+    # troughs =bm.df_features['sample_trough'].values
+    
+    # # 3. Find zerocrossings/flanks to complete the required inputs
+    # rises, decays = find_zerox(sig, peaks, troughs)
+    
+    # fig, ax = plt.subplots(figsize=(15, 3))
+    # plot_cyclepoints_array(bm.sig, bm.fs, bm.df_features, ax=ax)
+    
+
+    
+    
+    # 2. Extract Cycle Features on the Phase channel
+    df_features = compute_features(
+        sig_phase,
+        sfreq,
+        f_range=f_range,
+        threshold_kwargs=threshold_kwargs,
+        center_extrema="peak",
+    )
+
+    # 3. Derive instantaneous phase (0 to 2*pi) from cycle points
+    # Assign cycle extrema to phase values: trough=0, rise_zc=pi/2, peak=pi, decay_zc=3pi/2
+    phase_ts = np.full(len(sig_phase), np.nan)
+    for _, cycle in df_features.iterrows():
+        # Only retain cycles meeting the burst detection criteria
+        if not cycle["is_burst"]:
+            continue
+
+        c_start = int(cycle["sample_last_trough"])
+        c_peak = int(cycle["sample_peak"])
+        c_end = int(cycle["sample_next_trough"])
+        c_zerox_rise = int(cycle["sample_zerox_rise"])
+        c_zerox_decay = int(cycle["sample_zerox_decay"])
+
+        # Interpolate phase segmentally to preserve nonsinusoidal shape
+        phase_ts[c_start:c_zerox_rise] = np.linspace(
+            0, np.pi / 2, c_zerox_rise - c_start, endpoint=False
+        )
+        phase_ts[c_zerox_rise:c_peak] = np.linspace(
+            np.pi / 2, np.pi, c_peak - c_zerox_rise, endpoint=False
+        )
+        phase_ts[c_peak:c_zerox_decay] = np.linspace(
+            np.pi, 3 * np.pi / 2, c_zerox_decay - c_peak, endpoint=False
+        )
+        phase_ts[c_zerox_decay:c_end] = np.linspace(
+            3 * np.pi / 2, 2 * np.pi, c_end - c_zerox_decay, endpoint=False
+        )
+
+    # 4. Extract Amplitude Envelope from the Target Channel
+    # Bandpass filter the target channel and apply Hilbert transform
+    raw_amp = mne.filter.filter_data(
+        sig_amp_target,
+        sfreq,
+        l_freq=amp_band[0],
+        h_freq=amp_band[1],
+        verbose=False,
+    )
+    amp_env = np.abs(hilbert(raw_amp))
+
+    # 5. Compute Modulation Index (Tort et al., 2010) during detected bursts
+    valid_idx = ~np.isnan(phase_ts)
+    valid_phase = phase_ts[valid_idx]
+    valid_amp = amp_env[valid_idx]
+
+    n_bins = 18
+    phase_bins = np.linspace(0, 2 * np.pi, n_bins + 1)
+    mean_amp_per_bin = np.zeros(n_bins)
+
+    bin_assignments = np.digitize(valid_phase, phase_bins) - 1
+    for b in range(n_bins):
+        amps_in_bin = valid_amp[bin_assignments == b]
+        mean_amp_per_bin[b] = (
+            np.mean(amps_in_bin) if len(amps_in_bin) > 0 else 0
+        )
+
+    # Normalize amplitude distribution across bins to sum to 1
+    P = mean_amp_per_bin / np.sum(mean_amp_per_bin)
+    # Shannon entropy and KL-divergence against uniform distribution Q
+    shannon_entropy = -np.sum(P * np.log(P + 1e-12))
+    log_N = np.log(n_bins)
+    mi = (log_N - shannon_entropy) / log_N
+
+    print(
+        f"ByCycle Cross-PAC ({PHI_channel} phase -> {AMP_channel} amp): MI = {mi:.5f}"
+    )
+
+    # 6. Plot Phase-Amplitude Distribution
+    fig, ax = plt.subplots(
+        subplot_kw={"projection": "polar"}, figsize=(6, 6)
+    )
+    bin_centers = (phase_bins[:-1] + phase_bins[1:]) / 2
+    ax.bar(
+        bin_centers,
+        P,
+        width=(2 * np.pi / n_bins),
+        bottom=0.0,
+        edgecolor="k",
+        alpha=0.7,
+    )
+    ax.set_title(
+        f"ByCycle PAC: {PHI_channel} (Phase) vs {AMP_channel} (Amp)\nMI = {mi:.5f}",
+        va="bottom",
+    )
+    plt.show()
+
+
+if do_MWT_phase_plane:
+    import pywt
+    
+    # # --- 1. Generate Synthetic EEG Signal ---
+    # sfreq = 250  # Sampling rate in Hz
+    # duration = 4.0  # Duration in seconds
+    t = np.arange(0, len(sig_phase), sfreq)
+    dt = 1 / sfreq
+    
+    # # Simulated EEG segment: broadband noise + transient oscillatory bursts (alpha & beta)
+    # rng = np.random.default_rng(42)
+    # noise = rng.normal(0, 0.5, size=t.shape)
+    # alpha_burst = 1.5 * np.sin(2 * np.pi * 10 * t) * np.exp(-((t - 1.5) ** 2) / 0.1)
+    # beta_burst = 0.8 * np.sin(2 * np.pi * 22 * t) * np.exp(-((t - 2.8) ** 2) / 0.15)
+    # eeg_segment = alpha_burst + beta_burst + noise
+    
+    
+    eeg_segment = sig_phase
+    
+    # --- 2. Time-Frequency Analysis via PyWavelets ---
+    wavelet_name = 'cmor1.5-1.0'  # Complex Morlet with B=1.5 and C=1.0
+    target_freqs = np.linspace(2, 40, 100)  # Desired frequency grid in Hz
+    
+    # Map desired physical frequencies (Hz) to wavelet scales: scale = fc / (f * dt)
+    fc = pywt.central_frequency(wavelet_name)
+    scales = fc / (target_freqs * dt)
+    
+    # Compute complex CWT (returns coefficients and effective frequencies in Hz)
+    cwt_matrix, freqs = pywt.cwt(
+        eeg_segment, scales, wavelet_name, sampling_period=dt
+    )
+    
+    # Extract the imaginary component
+    cwt_imaginary = np.imag(cwt_matrix)
+    
+    # --- 3. Multi-Panel Visualization ---
+    fig, (ax_top, ax_bottom) = plt.subplots(
+        2, 1, figsize=(10, 6), sharex=True, gridspec_kw={'height_ratios': [1, 2]}
+    )
+    
+    # Top Panel: Raw EEG Segment
+    ax_top.plot(t, eeg_segment, color='#2c3e50', lw=1.2)
+    ax_top.set_ylabel(r'Amplitude ($\mu$V)')
+    ax_top.set_title('Raw EEG Segment', fontweight='bold', loc='left')
+    ax_top.grid(True, linestyle='--', alpha=0.5)
+    
+    # Bottom Panel: Time-Frequency Imaginary Plane
+    vbound = np.percentile(np.abs(cwt_imaginary), 98)  # Symmetric color limits
+    im = ax_bottom.pcolormesh(
+        t, freqs, cwt_imaginary,
+        shading='gouraud',
+        cmap='coolwarm',
+        vmin=-vbound,
+        vmax=vbound
+    )
+    ax_bottom.set_ylabel('Frequency (Hz)')
+    ax_bottom.set_xlabel('Time (s)')
+    ax_bottom.set_title(f'Imaginary Component Time-Frequency Plane ({wavelet_name})', fontweight='bold', loc='left')
+    
+    # Colorbar for quadrature/phase representation
+    cbar = fig.colorbar(im, ax=ax_bottom, orientation='horizontal', pad=0.2, aspect=30)
+    cbar.set_label(r'$\Im\{\text{CWT}(t, f)\}$')
+    
+    plt.tight_layout()
+    plt.show()
