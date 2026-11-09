@@ -161,47 +161,46 @@ for i in range(len(meta_df)):
     cnt_file_path = DATA_PATH + site_name + '\\' + cnt_file_name
     
     print(f"\n[{i+1}/{len(meta_df)}] Attempting to process: {meta_df.iloc[i].eeg_file_name}")
-    # raw = load_eeg(r'E:\COGA_eec\data\uconn\eec_1_a1_10003051.cnt')
-    raw = load_eeg(cnt_file_path)
+    if sample_freq == '256':
+        this_data_format = 'int16'
+    else:
+        this_data_format = 'int32'
+    attempts = (this_data_format, 'auto')
+    print(f"Expected Data format = {this_data_format}, sample rate = {sample_freq}")
+
+    
+    # 2. Safely Open the .cnt File
+    # TRY 'auto' FOR DATA FORMAT FIRST THEN TRY OTHER OPTION IF IT DOESN'T WORK
+    for attempt in attempts:
+        try:
+            # raw = load_eeg(r'E:\COGA_eec\data\uconn\eec_1_a1_10003051.cnt')
+            data = load_eeg(cnt_file_path)
+
+            # raw_header = mne.io.read_raw_cnt(cnt_file_path, data_format=attempt, preload=False, verbose=True)
+            # actual_sample_rate = raw_header.info['sfreq']
+            # channel_count = raw_header.info['nchan']
+            # print(f"Success: File contains {channel_count} channels sampled at {actual_sample_rate} Hz.")
+            # data = raw_header.load_data()
+            
+            # LET'S GET THE DURATION OF THIS SIGNAL, RIGHT HANDEDNESS, AND DATA FORMAT TO OPEN
+            meta_df.loc[i,'duration_seconds'] = len(data.get_data(['CZ'])[0])/int(data.info['sfreq'])
+            if 'hand' in data.info['subject_info'].keys():
+                meta_df.loc[i,'right_handed'] = data.info['subject_info']['hand']==1
+                
+            meta_df.loc[i ,'data_format'] = this_data_format
+            
+            # ndf = extract_fractal_features(meta_df.loc[i], cnt_file_path)
+    
+            
+            total_good+=1
+            
+        except (RuntimeError, MemoryError, ValueError) as e:
+            # Catch corrupted files, log them, and skip to the next iteration
+            print(f"Skipping {cnt_file_name}: Header may be corrupted - trying to open with {this_data_format}.")
+            print(e)
     
     ndf = extract_fractal_features(meta_df.loc[i], cnt_file_path)
     a = 1
-
-    # if sample_freq == '256':
-    #     this_data_format = 'int16'
-    # else:
-    #     this_data_format = 'int32'
-    # attempts = (this_data_format,'auto')
-    # print(f"Expected Data format = {this_data_format}, sample rate = {sample_freq}")
-
-    # # 2. Safely Open the .cnt File
-    # # TRY 'auto' FOR DATA FORMAT FIRST THEN TRY OTHER OPTION IF IT DOESN'T WORK
-    # for attempt in attempts:
-    #     try:
-    #         raw_header = mne.io.read_raw_cnt(cnt_file_path, data_format=attempt, preload=False, verbose=True)
-    #         actual_sample_rate = raw_header.info['sfreq']
-    #         channel_count = raw_header.info['nchan']
-    #         print(f"Success: File contains {channel_count} channels sampled at {actual_sample_rate} Hz.")
-            
-    #         data = raw_header.load_data()
-    #         # raw = data.copy()
-    #         # LET'S GET THE DURATION OF THIS SIGNAL, RIGHT HANDEDNESS, AND DATA FORMAT TO OPEN
-    #         meta_df.loc[i,'duration_seconds'] = len(data.get_data(['CZ'])[0])/data.info['sfreq']
-    #         if 'hand' in data.info['subject_info'].keys():
-    #             meta_df.loc[i,'right_handed'] = data.info['subject_info']['hand']==1
-                
-    #         meta_df.loc[i ,'data_format'] = 'auto'
-            
-    #         ndf = extract_fractal_features(meta_df.loc[i], cnt_file_path)
-    
-            
-    #         total_good+=1
-            
-    #     except (RuntimeError, MemoryError, ValueError) as e:
-    #         # Catch corrupted files, log them, and skip to the next iteration
-    #         print(f"Skipping {cnt_file_name}: Header may be corrupted - trying to open with {this_data_format}.")
-    #         print(e)
-            
         
     #         with open(WRITE_PATH + 'errors_cnt_files.txt', 'a') as bf:
     #             bf.write(str(cnt_file_name) + '\n')

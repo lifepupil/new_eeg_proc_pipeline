@@ -4,6 +4,7 @@ Created on Thu Jun 25 20:32:04 2026
 
 @author: lifep
 """
+from eeg_loader import load_eeg
 
 import numpy as np
 import pandas as pd
@@ -43,13 +44,15 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorpac
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="scipy")
 
 # DEBUG ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-i = 0
+i = 2
 # True False
-do_preproc = True
-do_quality_checks = True
-do_artifact_removal = True
+
+do_preproc = False
+do_quality_checks = do_preproc
+do_artifact_removal = do_preproc
 do_AutoReject = False
 do_pac = True
+do_pac_epochs = False
 do_bycycle = False
 do_MWT_phase_plane = False
 #  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~DEBUG
@@ -66,18 +69,19 @@ AMP_channel = 'O1'
 pac_method, pac_surrogate, pac_correction = 6, 2, 4
 n_perm = 500
 mcp = 'fdr' # maxstat bonferroni fdr
+alpha = 0.025
 
-phi_start = 7
-phi_stop = 14
+phi_start = 8
+phi_stop = 15
 phi_width = 1
 phi_step = 0.5
 
-amp_start = 24
-amp_stop = 52
+amp_start = 20
+amp_stop = 50
 amp_width = 2
 amp_step = 1
 
-vmax_pac = 4
+vmax_pac = 10
 
 notch_freqs = [60.0, 80.0]      # FREQUENCY (Hz) TO REMOVE LINE NOISE AND UNKNOWN NOISE FROM SIGNAL  
 lowfrq = 1                      # LOW PASS FREQUENCY, RECOMMENDED SETTING TO 1 HZ IF USING mne-icalabel
@@ -166,6 +170,8 @@ def salvage_cnt_data(file_path, data_dtype='<i4'):
         # Data is multiplexed (Sample1_Ch1, Sample1_Ch2... Sample2_Ch1...)
         remainder = raw_1d.size % n_channels
         if remainder != 0:
+            # print(f"Warning: File truncated mid-sample. Discarding {remainder} trailing values.")
+            # raw_1d = raw_1d[:-remainder]
             print(f"Warning: File truncated mid-sample. Discarding {remainder} trailing values.")
             raw_1d = raw_1d[:-remainder]
             
@@ -373,8 +379,8 @@ meta_df = pd.read_pickle(f"{WRITE_PATH}meta_data.pkl")
 
 # DO SOME PRELIMINARY PROCESSING OF METADATA TO EXTRACT CORRECT .CNT FILENAMES
 
-# meta_df = meta_df[pd.notna(meta_df.eeg_file_name)]
-meta_df = meta_df[meta_df.data_format=='auto']
+meta_df = meta_df[pd.notna(meta_df.eeg_file_name)]
+# meta_df = meta_df[meta_df.data_format=='auto']
 meta_df = meta_df.sort_values(['ID', 'age_this_visit'], ascending=[True, True]).reset_index(drop=True)
 
 
@@ -409,6 +415,8 @@ if do_preproc:
     try:
         # 1. Probe the header first without loading the heavy data matrix
         raw_header = mne.io.read_raw_cnt(cnt_file_path, data_format=this_data_format, preload=False, verbose=True)
+        # TO DO - UPDATE load_eeg FUNCTION TO TRUNCATE THE NON-EEG VALUES AT END OF SIGNAL 
+        # raw = load_eeg(cnt_file_path)
         
         # 2. Extract the embedded hardware information
         actual_sample_rate = raw_header.info['sfreq']
@@ -428,7 +436,7 @@ if do_preproc:
         # Fallback: Try extracting eeg data directly
         # Note: Newer Neuroscan files are 32-bit ('<i4'). If the array returns massive or noisy 
         # voltage values, the original file is likely 16-bit. If so, change data_dtype to '<i2'.
-        # recovered_data = salvage_cnt_data(cnt_file_path)
+        recovered_data = salvage_cnt_data(cnt_file_path)
         
         # In your final script, append this filename to a 'failed_files_log.txt' here
         with open(WRITE_PATH + 'errors_cnt_files.txt', 'a') as bf:
@@ -448,7 +456,7 @@ if do_preproc:
         if ch in raw.ch_names:
             raw.set_channel_types({ch: 'eog'})
     raw.drop_channels(['BLANK'], on_missing='warn')
-    montage = mne.channels.make_standard_montage('standard_1005')
+    montage = mne.channels.make_standard_montage('standard_1020')
     raw.set_montage(montage, match_case=False)
     # raw.compute_psd().plot()
     # rename_channels_eeglab_standard(raw)
@@ -541,6 +549,9 @@ if do_artifact_removal:
     ic_to_remove = [*set(exclude_idx)]
     ica.exclude = ic_to_remove
     raw = ica.apply(raw)
+    # TO DO - SAVE raw AS FIF OR OTHER FORMAT TO PRESERVE FOR ALTERNATE EPOCHING PROTOCOLS
+    raw.save(WRITE_PATH + cnt_file_name.replace('.cnt', '_eeg.fif'), overwrite=True)
+
     
     
     # PSEUDO-EPOCHING ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -592,23 +603,122 @@ if do_AutoReject:
         plt.close('all') # Prevent memory leaks from open figures
     
 
-# # 1. Load the cleaned n-second epoched FIF file
-# fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
-fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
-if 'epochs' in locals():
-    epochs_clean = epochs
-else:
-    epochs_clean = mne.read_epochs(fif_path, preload=True)
+if 'raw' not in locals():
+    raw = mne.io.read_raw_fif(WRITE_PATH + cnt_file_name.replace('.cnt', '_eeg.fif'))
 
-# Extract data: shape is (n_epochs, n_channels, n_times)
-epoch_data = epochs_clean.get_data()
+ch1_idx = raw.ch_names.index(PHI_channel)
+ch2_idx = raw.ch_names.index(AMP_channel)
+sfreq = raw.info['sfreq']
 
-
-ch1_idx = epochs_clean.ch_names.index(PHI_channel)
-ch2_idx = epochs_clean.ch_names.index(AMP_channel)
+block_data_PHI  = raw[ch1_idx,0:int(sfreq*180)][0][0]
+block_data_AMP  = raw[ch2_idx,0:int(sfreq*180)][0][0]
 
 
-if do_pac:
+# idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
+p = Pac(idpac=(pac_method, pac_surrogate, pac_correction), 
+        f_pha=(phi_start, phi_stop, phi_width, phi_step), 
+        f_amp=(amp_start, amp_stop, amp_width, amp_step), 
+        dcomplex='wavelet', 
+        width=7
+        )
+
+pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
+pval12 = p.infer_pvalues(p=alpha, mcp=mcp)
+print(f"Minimum p-value {pval12.min()}")
+xpac12 = pac_matrix12.mean(axis=-1)
+xpac_smean12 = xpac12[pval12<=alpha].mean()
+
+surro12 = p.surrogates.squeeze()
+print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro12.shape}")
+surro_max12 = surro12.max(axis=(1, 2))
+# plt.hist(surro_max12)
+print(f"Surrogates min, max : {surro_max12.min()}, {surro_max12.max()}")
+surro_max_z12 = (surro_max12 - np.mean(surro_max12)) / np.std(surro_max12)
+
+
+pac_matrix21 = p.filterfit(sfreq, block_data_AMP, block_data_PHI, n_perm=n_perm, n_jobs=-1,random_state=42)
+pval21 = p.infer_pvalues(p=alpha, mcp=mcp)
+print(f"Minimum p-value {pval21.min()}")
+xpac21 = pac_matrix21.mean(axis=-1)
+xpac_smean21 = xpac21[pval21<=alpha].mean()
+
+surro21 = p.surrogates.squeeze()
+print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro21.shape}")
+surro_max21 = surro21.max(axis=(1, 2))
+# plt.hist(surro_max)
+print(f"Surrogates min, max : {surro_max21.min()}, {surro_max21.max()}")
+surro_max_z21 = (surro_max21 - np.mean(surro_max21)) / np.std(surro_max21)
+
+
+# pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, p=0.05, mcp=mcp)
+# pval21 = p.infer_pvalues(p=0.05, mcp=mcp)
+# pac_s21 = pac_matrix21.copy().mean(axis=-1)
+# pac_s21[pval21>0.05] = np.nan
+
+
+# c1 = pac_matrix12.mean(axis=-1)
+# c2 = pac_matrix21.mean(axis=-1)
+# c3 = c1 - c2
+
+if 0: 
+    p.comodulogram(
+        pac_matrix12.mean(axis=-1),
+        cmap='viridis',
+        vmin=0,
+        # vmax=4,
+        # title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
+        title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel}",
+        subplot=111
+    )
+    
+    p.comodulogram(
+        pval12,
+        cmap='seismic',
+        # vmin=0,
+        # vmax=1,
+        title=f"p-values (min={pval12.min()})",
+        subplot=111
+    )
+    
+    p.comodulogram(
+        pac_matrix21.mean(axis=-1),
+        cmap='viridis',
+        vmin=0,
+        # vmax=vmax_pac,
+        title=f"phase {AMP_channel} and amplitude {PHI_channel}",
+        subplot=111
+    )
+    p.comodulogram(
+        pval21,
+        cmap='seismic',
+        vmin=0,
+        vmax=1,
+        title=f"p-values (min={pval21.min()})",
+        subplot=111
+    )    
+    # plt.close()
+
+plt.hist(surro_max_z12, bins=20, alpha=0.7, color="steelblue", density=True)
+
+# plt.close()
+
+
+if do_pac_epochs:
+    
+    # # 1. Load the cleaned n-second epoched FIF file
+    # fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
+    fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
+    if 'epochs' in locals():
+        epochs_clean = epochs
+    else:
+        if 0:
+            epochs_clean = mne.read_epochs(fif_path, preload=True)
+            
+    # Extract data: shape is (n_epochs, n_channels, n_times)
+    epoch_data = epochs_clean.get_data()
+    
+    ch1_idx = epochs_clean.ch_names.index(PHI_channel)
+    ch2_idx = epochs_clean.ch_names.index(AMP_channel)
     
     # Extract sampling frequency and data: shape -> (n_epochs, n_channels, n_times)
     sfreq = epochs_clean.info['sfreq']
@@ -671,7 +781,7 @@ if do_pac:
         surro12 = p.surrogates.squeeze()
         print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro12.shape}")
         surro_max12 = surro12.max(axis=(1, 2))
-        # plt.hist(surro_max)
+        # plt.hist(surro_max12)
         print(f"Surrogates min, max : {surro_max12.min()}, {surro_max12.max()}")
         surro_max_z12 = (surro_max12 - np.mean(surro_max12)) / np.std(surro_max12)
 
@@ -766,7 +876,8 @@ if do_pac:
             cmap='viridis',
             vmin=0,
             vmax=4,
-            title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
+            # title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
+            title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel}",
             subplot=111
         )
         

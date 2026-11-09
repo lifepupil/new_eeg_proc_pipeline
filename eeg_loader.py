@@ -32,6 +32,7 @@ def load_eeg(file_path: Union[str, Path], montage_name: str = 'standard_1020') -
     Windows 32-bit Overflow errors.
     """
     file_path = Path(file_path)
+    eye_blink_chans = ['X', 'Y']
     
     if not file_path.exists():
         logger.error(f"File not found: {file_path}")
@@ -56,7 +57,21 @@ def load_eeg(file_path: Union[str, Path], montage_name: str = 'standard_1020') -
 
         # Apply standard electrode geometry (fails silently if channel names don't match 10-20)
         try:
-            raw.set_montage(montage_name, match_case=False)
+            # MONTAGE SETUP ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+            # WE EXCLUDE THE BLANK CHANNEL AND RELABEL CHANNEL TYPES OF THE TWO EYE CHANNELS TO eog
+            # ASSUMES THAT ALL CHANNELS ARE LABELED AS EEG WHETHER THEY ARE OR NOT
+            # X = VEOG, Y = HEOG
+            for ch in eye_blink_chans:
+                if ch in raw.ch_names:
+                    raw.set_channel_types({ch: 'eog'})
+            raw.drop_channels(['BLANK'], on_missing='warn')
+            montage = mne.channels.make_standard_montage(montage_name)
+            raw.set_montage(montage, match_case=False)
+            # raw.compute_psd().plot()
+            # rename_channels_eeglab_standard(raw)
+            # raw.plot_sensors(kind='3d')
+            
+            # raw.set_montage(montage_name, match_case=False)
             logger.info(f"Successfully applied '{montage_name}' montage.")
         except Exception as e:
             logger.warning(f"Could not apply montage '{montage_name}': {e}")
@@ -152,7 +167,13 @@ def _load_neuroscan_cnt(file_path: Path) -> mne.io.Raw:
     and brute-forces the binary extraction.
     """
     try:
-        return mne.io.read_raw_cnt(file_path, preload=True, verbose=False)
+        raw_header = mne.io.read_raw_cnt(file_path, preload=False, verbose=False)
+        actual_sample_rate = raw_header.info['sfreq']
+        channel_count = raw_header.info['nchan']
+        print(f"Success: File contains {channel_count} channels sampled at {actual_sample_rate} Hz.")
+        raw = raw_header.load_data()
+        return raw
+    
     
     except (OverflowError, RuntimeError) as e:
         logger.warning(f"Standard parser failed ({type(e).__name__}). Automating byte-depth detection.")
