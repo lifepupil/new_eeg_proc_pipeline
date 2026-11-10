@@ -44,7 +44,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="tensorpac
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="scipy")
 
 # DEBUG ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-i = 2
+i = 110
 # True False
 
 do_preproc = False
@@ -64,12 +64,15 @@ DATA_PATH = 'E:\\COGA_eec\\data\\'
 WRITE_PATH = 'E:\\COGA_eec\\eeg_pipe\\'
 
 # Choose channels to inspect (e.g., 'CZ', 'FZ', or 'OZ') for PAC estimates
-PHI_channel = 'F3'
-AMP_channel = 'O1'   
+# PHI_channel = 'F3'
+# AMP_channel = 'O1'   
+PHI_channel = 'F4'
+AMP_channel = 'O2'   
 pac_method, pac_surrogate, pac_correction = 6, 2, 4
 n_perm = 500
 mcp = 'fdr' # maxstat bonferroni fdr
 alpha = 0.025
+interval_dur_secs = 120
 
 phi_start = 8
 phi_stop = 15
@@ -602,116 +605,126 @@ if do_AutoReject:
         
         plt.close('all') # Prevent memory leaks from open figures
     
-
-if 'raw' not in locals():
-    raw = mne.io.read_raw_fif(WRITE_PATH + cnt_file_name.replace('.cnt', '_eeg.fif'))
-
-ch1_idx = raw.ch_names.index(PHI_channel)
-ch2_idx = raw.ch_names.index(AMP_channel)
-sfreq = raw.info['sfreq']
-
-block_data_PHI  = raw[ch1_idx,0:int(sfreq*180)][0][0]
-block_data_AMP  = raw[ch2_idx,0:int(sfreq*180)][0][0]
-
-
-# idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
-p = Pac(idpac=(pac_method, pac_surrogate, pac_correction), 
-        f_pha=(phi_start, phi_stop, phi_width, phi_step), 
-        f_amp=(amp_start, amp_stop, amp_width, amp_step), 
-        dcomplex='wavelet', 
-        width=7
+if do_pac:
+    if 'raw' not in locals():
+        raw = mne.io.read_raw_fif(WRITE_PATH + cnt_file_name.replace('.cnt', '_eeg.fif'))
+    
+    ch1_idx = raw.ch_names.index(PHI_channel)
+    ch2_idx = raw.ch_names.index(AMP_channel)
+    sfreq = raw.info['sfreq']
+    
+    block_data_PHI  = raw[ch1_idx,0:int(sfreq*interval_dur_secs)][0][0]
+    block_data_AMP  = raw[ch2_idx,0:int(sfreq*interval_dur_secs)][0][0]
+    
+    
+    # idpac=(2, 0, 0): Modulation Index (Tort et al.), no surrogate, no normalization
+    p = Pac(idpac=(pac_method, pac_surrogate, pac_correction), 
+            f_pha=(phi_start, phi_stop, phi_width, phi_step), 
+            f_amp=(amp_start, amp_stop, amp_width, amp_step), 
+            dcomplex='wavelet', 
+            width=7
+            )
+    
+    pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
+    pval12 = p.infer_pvalues(p=1, mcp=mcp)
+    pmin12 = round(pval12.min(),5)
+    # pval12 = p.infer_pvalues(p=alpha, mcp=mcp)
+    print(f"Minimum p-value {pmin12}")
+    xpac12 = pac_matrix12.mean(axis=-1)
+    xpac_smean12 = xpac12[pval12<=alpha].mean()
+    
+    surro12 = p.surrogates.squeeze()
+    print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro12.shape}")
+    surro_max12 = surro12.max(axis=(1, 2))
+    # plt.hist(surro_max12)
+    print(f"Surrogates min, max : {surro_max12.min()}, {surro_max12.max()}")
+    surro_max_z12 = (surro_max12 - np.mean(surro_max12)) / np.std(surro_max12)
+    
+    
+    pac_matrix21 = p.filterfit(sfreq, block_data_AMP, block_data_PHI, n_perm=n_perm, n_jobs=-1,random_state=42)
+    pval21 = p.infer_pvalues(p=1, mcp=mcp)
+    pmin21 = round(pval21.min(),5)
+    # pval21 = p.infer_pvalues(p=alpha, mcp=mcp)
+    print(f"Minimum p-value {pmin21}")
+    xpac21 = pac_matrix21.mean(axis=-1)
+    xpac_smean21 = xpac21[pval21<=alpha].mean()
+    
+    surro21 = p.surrogates.squeeze()
+    print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro21.shape}")
+    surro_max21 = surro21.max(axis=(1, 2))
+    # plt.hist(surro_max)
+    print(f"Surrogates min, max : {surro_max21.min()}, {surro_max21.max()}")
+    surro_max_z21 = (surro_max21 - np.mean(surro_max21)) / np.std(surro_max21)
+    
+    
+    # pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, p=0.05, mcp=mcp)
+    # pval21 = p.infer_pvalues(p=0.05, mcp=mcp)
+    # pac_s21 = pac_matrix21.copy().mean(axis=-1)
+    # pac_s21[pval21>0.05] = np.nan
+    
+    
+    # c1 = pac_matrix12.mean(axis=-1)
+    # c2 = pac_matrix21.mean(axis=-1)
+    # c3 = c1 - c2
+    
+    if 1: 
+        plt.figure(figsize=(7, 5))
+        p.comodulogram(
+            pac_matrix12.mean(axis=-1),
+            cmap='viridis',
+            vmin=0,
+            # vmax=4,
+            # title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
+            title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel}",
+            subplot=111
         )
-
-pac_matrix12 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, n_jobs=-1,random_state=42)
-pval12 = p.infer_pvalues(p=alpha, mcp=mcp)
-print(f"Minimum p-value {pval12.min()}")
-xpac12 = pac_matrix12.mean(axis=-1)
-xpac_smean12 = xpac12[pval12<=alpha].mean()
-
-surro12 = p.surrogates.squeeze()
-print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro12.shape}")
-surro_max12 = surro12.max(axis=(1, 2))
-# plt.hist(surro_max12)
-print(f"Surrogates min, max : {surro_max12.min()}, {surro_max12.max()}")
-surro_max_z12 = (surro_max12 - np.mean(surro_max12)) / np.std(surro_max12)
-
-
-pac_matrix21 = p.filterfit(sfreq, block_data_AMP, block_data_PHI, n_perm=n_perm, n_jobs=-1,random_state=42)
-pval21 = p.infer_pvalues(p=alpha, mcp=mcp)
-print(f"Minimum p-value {pval21.min()}")
-xpac21 = pac_matrix21.mean(axis=-1)
-xpac_smean21 = xpac21[pval21<=alpha].mean()
-
-surro21 = p.surrogates.squeeze()
-print(f"Surrogates shape (n_perm, n_amp, n_pha) : {surro21.shape}")
-surro_max21 = surro21.max(axis=(1, 2))
-# plt.hist(surro_max)
-print(f"Surrogates min, max : {surro_max21.min()}, {surro_max21.max()}")
-surro_max_z21 = (surro_max21 - np.mean(surro_max21)) / np.std(surro_max21)
-
-
-# pac_matrix21 = p.filterfit(sfreq, block_data_PHI, block_data_AMP, n_perm=n_perm, p=0.05, mcp=mcp)
-# pval21 = p.infer_pvalues(p=0.05, mcp=mcp)
-# pac_s21 = pac_matrix21.copy().mean(axis=-1)
-# pac_s21[pval21>0.05] = np.nan
-
-
-# c1 = pac_matrix12.mean(axis=-1)
-# c2 = pac_matrix21.mean(axis=-1)
-# c3 = c1 - c2
-
-if 0: 
-    p.comodulogram(
-        pac_matrix12.mean(axis=-1),
-        cmap='viridis',
-        vmin=0,
-        # vmax=4,
-        # title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} - Block {block_idx+1} ({epoch_dur}s)",
-        title=f"{age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel}",
-        subplot=111
-    )
+        
+        plt.figure(figsize=(7, 5))
+        p.comodulogram(
+            pval12,
+            cmap='seismic',
+            # vmin=0,
+            # vmax=1,
+            title=f"P-VALUES {age} {sex} AUD={diag} Ph: {PHI_channel} Amp: {AMP_channel} (min={pmin12})",
+            subplot=111
+        )
+        
+        plt.figure(figsize=(7, 5))
+        p.comodulogram(
+            pac_matrix21.mean(axis=-1),
+            cmap='viridis',
+            vmin=0,
+            # vmax=vmax_pac,
+            title=f"{age} {sex} AUD={diag} Ph: {AMP_channel} Amp: {PHI_channel}",
+            subplot=111
+        )
+        
+        plt.figure(figsize=(7, 5))
+        p.comodulogram(
+            pval21,
+            cmap='seismic',
+            vmin=0,
+            vmax=1,
+            title=f"P-VALUES {age} {sex} AUD={diag} Ph: {AMP_channel} Amp: {PHI_channel} (min={pmin21})",
+            subplot=111
+        )    
+        plt.show()
+        plt.close()
     
-    p.comodulogram(
-        pval12,
-        cmap='seismic',
-        # vmin=0,
-        # vmax=1,
-        title=f"p-values (min={pval12.min()})",
-        subplot=111
-    )
+    plt.hist(surro_max_z12, bins=20, alpha=0.7, color="steelblue", density=True)
     
-    p.comodulogram(
-        pac_matrix21.mean(axis=-1),
-        cmap='viridis',
-        vmin=0,
-        # vmax=vmax_pac,
-        title=f"phase {AMP_channel} and amplitude {PHI_channel}",
-        subplot=111
-    )
-    p.comodulogram(
-        pval21,
-        cmap='seismic',
-        vmin=0,
-        vmax=1,
-        title=f"p-values (min={pval21.min()})",
-        subplot=111
-    )    
     # plt.close()
-
-plt.hist(surro_max_z12, bins=20, alpha=0.7, color="steelblue", density=True)
-
-# plt.close()
 
 
 if do_pac_epochs:
     
     # # 1. Load the cleaned n-second epoched FIF file
-    # fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
-    fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
     if 'epochs' in locals():
         epochs_clean = epochs
     else:
-        if 0:
+        if 1:
+            # fif_path = r"E:\COGA_eec\eeg_pipe\eec_1_a1_10003051-epo.fif"
+            fif_path = WRITE_PATH + cnt_file_name.replace('.cnt', '-epo.fif')
             epochs_clean = mne.read_epochs(fif_path, preload=True)
             
     # Extract data: shape is (n_epochs, n_channels, n_times)
